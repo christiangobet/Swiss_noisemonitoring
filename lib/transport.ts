@@ -54,8 +54,8 @@ export async function searchStations(q: string): Promise<Array<{ id: string; nam
     .map(s => ({ id: String(s.id), name: s.name }))
 }
 
-/** Fetch upcoming tram departures for a single stop. */
-export async function getStationboardTrams(stopId: string, limit = 20): Promise<TramDeparture[]> {
+/** Fetch all departures for a single stop, optionally filtered to trams only. */
+export async function getStationboardTrams(stopId: string, limit = 20, tramOnly = true): Promise<TramDeparture[]> {
   const url = `${BASE}/stationboard?station=${encodeURIComponent(stopId)}&limit=${limit}`
   const res = await fetch(url, { headers: UA })
   if (!res.ok) return []
@@ -63,7 +63,11 @@ export async function getStationboardTrams(stopId: string, limit = 20): Promise<
   const stopName = data.station?.name ?? stopId
 
   return (data.stationboard ?? [])
-    .filter(d => d.category === 'T' || d.category === 'tram')
+    .filter(d => {
+      if (!tramOnly) return true
+      const cat = String(d.category ?? '').trim().toLowerCase()
+      return cat === 't' || cat === 'tram' || cat === 'tramway'
+    })
     .map(d => {
       const sched = fixIsoOffset(d.stop?.departure ?? '')
       const prog  = fixIsoOffset(d.stop?.prognosis?.departure ?? '')
@@ -79,9 +83,10 @@ export async function getStationboardTrams(stopId: string, limit = 20): Promise<
     .filter(d => d.scheduled)
 }
 
-/** Fetch upcoming trams for multiple stops concurrently. */
+/** Fetch all upcoming departures for configured stops (no tram-only filter —
+ *  the user already chose these stops explicitly as tram stops). */
 export async function getUpcomingTrams(stopIds: string[]): Promise<TramDeparture[]> {
-  const results = await Promise.all(stopIds.map(id => getStationboardTrams(id, 15)))
+  const results = await Promise.all(stopIds.map(id => getStationboardTrams(id, 20, false)))
   return results.flat().sort(
     (a, b) => new Date(a.expected).getTime() - new Date(b.expected).getTime()
   )

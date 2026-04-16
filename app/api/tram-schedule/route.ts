@@ -1,10 +1,12 @@
 export const dynamic = 'force-dynamic'
 
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
-import { getUpcomingTrams } from '@/lib/transport'
+import { getUpcomingTrams, getStationboardTrams } from '@/lib/transport'
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const debug = req.nextUrl.searchParams.has('debug')
+
   try {
     const activeStops = await sql`
       SELECT stop_id, stop_name
@@ -18,6 +20,17 @@ export async function GET() {
 
     const stopIds = activeStops.map(s => String(s.stop_id))
     const departures = await getUpcomingTrams(stopIds)
+
+    if (debug) {
+      // Raw stationboard per stop for diagnostics
+      const raw = await Promise.all(
+        stopIds.map(async id => {
+          const rows = await getStationboardTrams(id, 5, false)
+          return { stop_id: id, count: rows.length, sample: rows.slice(0, 3) }
+        })
+      )
+      return NextResponse.json({ departures, count: departures.length, debug: { stop_ids: stopIds, per_stop: raw } })
+    }
 
     return NextResponse.json({ departures, count: departures.length })
   } catch (err: unknown) {
