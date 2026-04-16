@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo, useTransition } from 'react'
 import {
   ComposedChart,
   Line,
@@ -14,7 +14,7 @@ import {
 } from 'recharts'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
-import { Mic, MicOff } from 'lucide-react'
+import { Mic, MicOff, Tag } from 'lucide-react'
 import { formatZurichTime } from '@/lib/utils'
 import { NOISE_LIMITS } from '@/lib/db'
 
@@ -115,8 +115,11 @@ export function LiveChart() {
   const [micActive, setMicActive] = useState(false)
   const [micDb,     setMicDb]     = useState<number | null>(null)
   const [micError,  setMicError]  = useState<string | null>(null)
-  const [bands,     setBands]     = useState<number[]>([])
-  const [tramScore, setTramScore] = useState<number>(0)
+  const [bands,      setBands]     = useState<number[]>([])
+  const [tramScore,  setTramScore] = useState<number>(0)
+  const [manualTags, setManualTags] = useState<number[]>([])   // manual tram timestamps
+  const [tagFlash,   setTagFlash]   = useState(false)          // brief "Tagged!" feedback
+  const [, startTransition] = useTransition()
 
   const streamRef      = useRef<MediaStream | null>(null)
   const ctxRef         = useRef<AudioContext | null>(null)
@@ -124,9 +127,10 @@ export function LiveChart() {
   const freqBufRef     = useRef<Float32Array<ArrayBuffer> | null>(null)
   const rafRef         = useRef<number>(0)
   const flushTimer     = useRef<ReturnType<typeof setInterval> | null>(null)
-  const flushBuf       = useRef<Array<{ ts: string; db_raw: number }>>([])
+  const flushBuf       = useRef<Array<{ ts: string; db_raw: number; tram_flag?: boolean }>>([])
   const lastTickMs     = useRef<number>(0)   // display throttle
   const lastStoreMs    = useRef<number>(0)   // storage throttle (1/s)
+  const currentDbRef   = useRef<number | null>(null)  // latest mic dB for tagging
 
   // Day/night ES II limit
   const limit = useMemo(() => {
@@ -177,6 +181,30 @@ export function LiveChart() {
     return () => { clearInterval(t1); clearInterval(t2) }
   }, [fetchLive, fetchSchedule])
 
+  // ── Manual tram tag ───────────────────────────────────────────────────────
+  const tagTram = useCallback(() => {
+    const tsMs = Date.now()
+    const db   = currentDbRef.current
+    setManualTags(prev => [...prev.filter(t => t >= tsMs - HISTORY_MS), tsMs])
+    setTagFlash(true)
+    setTimeout(() => setTagFlash(false), 1200)
+    // Flush tag reading to DB — marks the reading as a confirmed tram passage
+    if (db !== null) {
+      flushBuf.current.push({ ts: new Date(tsMs).toISOString(), db_raw: db, tram_flag: true })
+    }
+  }, [])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return
+      const tag = e.target as HTMLElement
+      if (tag.tagName === 'INPUT' || tag.tagName === 'TEXTAREA') return
+      if (e.key === 't' || e.key === 'T') { e.preventDefault(); startTransition(tagTram) }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [tagTram, startTransition])
+
   // ── Browser mic ───────────────────────────────────────────────────────────
   const stopMic = useCallback(() => {
     cancelAnimationFrame(rafRef.current)
@@ -184,6 +212,7 @@ export function LiveChart() {
     streamRef.current?.getTracks().forEach(t => t.stop())
     ctxRef.current?.close().catch(() => {})
     streamRef.current = ctxRef.current = analyserRef.current = freqBufRef.current = null
+    currentDbRef.current = null
     flushBuf.current  = []
     lastTickMs.current  = 0
     lastStoreMs.current = 0
@@ -192,6 +221,7 @@ export function LiveChart() {
     setMicPoints([])
     setBands([])
     setTramScore(0)
+    setManualTags([])
   }, [])
 
   // Cleanup on unmount
@@ -243,6 +273,7 @@ export function LiveChart() {
 
         const db   = getRmsDb(node)
         const tsMs = Date.now()
+        currentDbRef.current = db
 
         // Update live dB readout every frame
         setMicDb(db)
@@ -342,17 +373,36 @@ export function LiveChart() {
             )
           )}
         </div>
-        <div className="flex flex-col items-end gap-0.5">
-          <Button
-            size="sm"
-            variant={micActive ? 'destructive' : 'outline'}
-            className="h-7 px-2 text-xs gap-1"
-            onClick={micActive ? stopMic : startMic}
-          >
-            {micActive ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
-            {micActive ? 'Stop mic' : 'Use mic'}
-          </Button>
-          {micError && <span className="text-xs text-destructive max-w-[200px] text-right">{micError}</span>}
+        <div className="flex items-center gap-2">
+          {micActive && (
+            <div className="flex flex-col items-center gap-0.5">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs gap-1 border-amber-500/50 text-amber-400 hover:bg-amber-500/10"
+                onClick={tagTram}
+                title="Tag tram passage now (keyboard: T)"
+              >
+                <Tag className="h-3 w-3" />
+                Tag tram <kbd className="opacity-50 font-mono">[T]</kbd>
+              </Button>
+              {tagFlash && (
+                <span className="text-[10px] text-amber-400 animate-pulse">Tagged!</span>
+              )}
+            </div>
+          )}
+          <div className="flex flex-col items-end gap-0.5">
+            <Button
+              size="sm"
+              variant={micActive ? 'destructive' : 'outline'}
+              className="h-7 px-2 text-xs gap-1"
+              onClick={micActive ? stopMic : startMic}
+            >
+              {micActive ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
+              {micActive ? 'Stop mic' : 'Use mic'}
+            </Button>
+            {micError && <span className="text-xs text-destructive max-w-[200px] text-right">{micError}</span>}
+          </div>
         </div>
       </div>
 
@@ -472,6 +522,27 @@ export function LiveChart() {
               />
             ))}
 
+            {/* Manual tram tags — bright vertical marker with ±5 s highlight */}
+            {manualTags.filter(t => t >= domainMin && t <= domainMax).map((t, i) => (
+              <ReferenceArea
+                key={`tag-band-${t}-${i}`}
+                x1={t - 5000}
+                x2={t + 5000}
+                fill="rgba(251,191,36,0.12)"
+                stroke="none"
+              />
+            ))}
+            {manualTags.filter(t => t >= domainMin && t <= domainMax).map((t, i) => (
+              <ReferenceLine
+                key={`tag-${t}-${i}`}
+                x={t}
+                stroke="#fbbf24"
+                strokeWidth={2}
+                strokeDasharray="4 2"
+                label={{ value: '✦ tram', position: 'insideTopLeft', fill: '#fbbf24', fontSize: 9, fontWeight: 700 }}
+              />
+            ))}
+
             {/* ES II noise limit */}
             <ReferenceLine
               y={limit}
@@ -522,6 +593,12 @@ export function LiveChart() {
           <span className="inline-block w-4 h-px bg-blue-400" />
           Interior{micActive ? ' (mic)' : ''}
         </span>
+        {manualTags.length > 0 && (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-4 h-px border-t-2 border-dashed border-amber-400" />
+            Tagged ({manualTags.length})
+          </span>
+        )}
         {Array.from(new Set(schedule.map(d => d.line))).map(line => (
           <span key={line} className="flex items-center gap-1">
             <span className="inline-block w-2.5 h-3 rounded-sm" style={{ backgroundColor: withAlpha(lineColor(line), 0.6) }} />

@@ -7,6 +7,7 @@ import { isValidIso } from '@/lib/utils'
 interface IngestReading {
   ts: string
   db_raw: number
+  tram_flag?: boolean
 }
 
 // Browser-side interior ingest — no API key (browser can't hold secrets).
@@ -78,7 +79,7 @@ export async function POST(req: NextRequest) {
     const dbCal = r.db_raw + offsetDb
     await sql`
       INSERT INTO readings (ts, source, db_raw, db_cal, tram_flag)
-      VALUES (${r.ts}, 'interior', ${r.db_raw}, ${dbCal}, FALSE)
+      VALUES (${r.ts}, 'interior', ${r.db_raw}, ${dbCal}, ${r.tram_flag === true})
     `
     inserted++
   }

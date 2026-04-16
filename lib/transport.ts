@@ -33,7 +33,8 @@ interface OdchStationboardResult {
   station?: { id: string; name: string }
   stationboard: Array<{
     category: string
-    number: string
+    name: string      // display name e.g. "T 3"
+    number: string    // may be service/trip number — prefer parsing from `name`
     to: string
     stop: {
       departure: string | null
@@ -56,9 +57,23 @@ export async function searchStations(q: string): Promise<Array<{ id: string; nam
 
 /** Fetch all departures for a single stop, optionally filtered to trams only. */
 export async function getStationboardTrams(stopId: string, limit = 20, tramOnly = true): Promise<TramDeparture[]> {
-  const url = `${BASE}/stationboard?station=${encodeURIComponent(stopId)}&limit=${limit}`
-  const res = await fetch(url, { headers: UA })
-  if (!res.ok) return []
+  const params = new URLSearchParams({
+    station: stopId,
+    limit:   String(limit),
+  })
+  if (tramOnly) params.append('transportations[]', 'tram')
+  const url = `${BASE}/stationboard?${params}`
+  let res: Response
+  try {
+    res = await fetch(url, { headers: UA, cache: 'no-store' })
+  } catch (err) {
+    console.error(`transport: fetch failed for stop ${stopId}:`, err)
+    return []
+  }
+  if (!res.ok) {
+    console.error(`transport: stationboard HTTP ${res.status} for stop ${stopId}`)
+    return []
+  }
   const data: OdchStationboardResult = await res.json()
   const stopName = data.station?.name ?? stopId
 
@@ -69,12 +84,15 @@ export async function getStationboardTrams(stopId: string, limit = 20, tramOnly 
       return cat === 't' || cat === 'tram' || cat === 'tramway'
     })
     .map(d => {
+      // `name` is the display name e.g. "T 3" — strip the letter prefix to get the line number.
+      // Fall back to `number` which may be service/trip number on some responses.
+      const lineFromName = (d.name ?? '').replace(/^[A-Za-z]+\s*/, '').trim()
       const sched = fixIsoOffset(d.stop?.departure ?? '')
       const prog  = fixIsoOffset(d.stop?.prognosis?.departure ?? '')
       return {
         stop_id:   stopId,
         stop_name: stopName,
-        line:      d.number ?? '',
+        line:      lineFromName || d.number || '',
         direction: d.to ?? '',
         scheduled: sched,
         expected:  prog || sched,
