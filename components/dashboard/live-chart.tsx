@@ -54,9 +54,10 @@ function withAlpha(hex: string, a: number) {
 const HISTORY_MS    = 3 * 60 * 1000  // 3 min history
 const FUTURE_MS     = 2 * 60 * 1000  // 2 min future
 const TRAM_PAD_MS   = 20 * 1000      // ±20 s tram band
-const CHART_TICK_MS = 250            // chart update rate
-const MIC_FLUSH_MS  = 2000           // DB flush interval
-const DB_OFFSET     = 94             // dBFS → rough dBSPL
+const CHART_TICK_MS   = 250    // display refresh — smooth ECG
+const STORAGE_TICK_MS = 1000   // one sample/s written to DB (10× fewer writes)
+const MIC_FLUSH_MS    = 10000  // flush to DB every 10 s (10 readings/batch)
+const DB_OFFSET       = 94     // dBFS → rough dBSPL
 
 // Returns dB or null when audio context is suspended / signal is zero
 function getRmsDb(analyser: AnalyserNode): number | null {
@@ -86,7 +87,8 @@ export function LiveChart() {
   const rafRef         = useRef<number>(0)
   const flushTimer     = useRef<ReturnType<typeof setInterval> | null>(null)
   const flushBuf       = useRef<Array<{ ts: string; db_raw: number }>>([])
-  const lastTickMs     = useRef<number>(0)
+  const lastTickMs     = useRef<number>(0)   // display throttle
+  const lastStoreMs    = useRef<number>(0)   // storage throttle (1/s)
 
   // Day/night ES II limit
   const limit = useMemo(() => {
@@ -145,7 +147,8 @@ export function LiveChart() {
     ctxRef.current?.close().catch(() => {})
     streamRef.current = ctxRef.current = analyserRef.current = null
     flushBuf.current  = []
-    lastTickMs.current = 0
+    lastTickMs.current  = 0
+    lastStoreMs.current = 0
     setMicActive(false)
     setMicDb(null)
     setMicPoints([])
@@ -203,7 +206,7 @@ export function LiveChart() {
         // Update live dB readout every frame
         setMicDb(db)
 
-        // Update chart data at CHART_TICK_MS rate (avoid flooding React)
+        // Update chart at display rate (smooth ECG)
         if (tsMs - lastTickMs.current >= CHART_TICK_MS) {
           lastTickMs.current = tsMs
           if (db !== null) {
@@ -211,8 +214,13 @@ export function LiveChart() {
               const cutoff = tsMs - HISTORY_MS
               return [...prev.filter(p => p.tsMs >= cutoff), { tsMs, ext: null, int: db }]
             })
-            flushBuf.current.push({ ts: new Date(tsMs).toISOString(), db_raw: db })
           }
+        }
+
+        // Write to DB at storage rate — 1 sample/s regardless of display rate
+        if (db !== null && tsMs - lastStoreMs.current >= STORAGE_TICK_MS) {
+          lastStoreMs.current = tsMs
+          flushBuf.current.push({ ts: new Date(tsMs).toISOString(), db_raw: db })
         }
 
         rafRef.current = requestAnimationFrame(tick)
