@@ -29,6 +29,12 @@ interface ChartPoint {
   int: number | null
 }
 
+interface ManualTag {
+  tagMs:   number   // when user pressed T — visual anchor
+  startMs: number   // detected passage start (auto-expanded)
+  endMs:   number   // detected passage end (auto-expanded)
+}
+
 interface TramDep {
   line: string
   direction: string
@@ -95,6 +101,61 @@ function computeTramScore(bands: number[]): number {
   return Math.round(Math.min(100, Math.max(0, (ratio - 0.3) / 4.7 * 100)))
 }
 
+/**
+ * Given a set of recent dB readings and a user-tag timestamp, walk backwards
+ * and forwards to find where the elevated noise actually starts and ends.
+ * Uses the 15th-percentile of readings in the search window as the baseline;
+ * anything ≥ baseline + THRESHOLD_DB counts as "passage noise".
+ */
+const PASSAGE_THRESHOLD_DB = 3.5   // dB above ambient to count as passage
+const PASSAGE_LOOK_MS      = 90_000 // look up to ±90 s from the tag
+
+function detectPassageBounds(
+  points: ChartPoint[],
+  tagMs: number
+): { startMs: number; endMs: number } {
+  const window = points
+    .filter(p => p.int !== null &&
+      p.tsMs >= tagMs - PASSAGE_LOOK_MS &&
+      p.tsMs <= tagMs + PASSAGE_LOOK_MS)
+    .sort((a, b) => a.tsMs - b.tsMs)
+
+  if (window.length < 4) return { startMs: tagMs - 5000, endMs: tagMs + 5000 }
+
+  // Baseline: 15th percentile across the search window
+  const sorted   = window.map(p => p.int as number).sort((a, b) => a - b)
+  const baseline = sorted[Math.floor(sorted.length * 0.15)]
+  const threshold = baseline + PASSAGE_THRESHOLD_DB
+
+  // Index of point closest to tag time
+  let nearestIdx = 0
+  let nearestDist = Infinity
+  for (let i = 0; i < window.length; i++) {
+    const d = Math.abs(window[i].tsMs - tagMs)
+    if (d < nearestDist) { nearestDist = d; nearestIdx = i }
+  }
+
+  // Walk backwards to find where level drops below threshold
+  let startIdx = nearestIdx
+  for (let i = nearestIdx; i >= 0; i--) {
+    if ((window[i].int as number) < threshold) break
+    startIdx = i
+  }
+
+  // Walk forwards to find where level drops below threshold
+  let endIdx = nearestIdx
+  for (let i = nearestIdx; i < window.length; i++) {
+    if ((window[i].int as number) < threshold) break
+    endIdx = i
+  }
+
+  // Ensure a minimum ±5 s span so the tag is always visible on the chart
+  return {
+    startMs: Math.min(window[startIdx].tsMs, tagMs - 5000),
+    endMs:   Math.max(window[endIdx].tsMs,   tagMs + 5000),
+  }
+}
+
 function getRmsDb(analyser: AnalyserNode): number | null {
   const buf = new Float32Array(analyser.fftSize)
   analyser.getFloatTimeDomainData(buf)
@@ -117,8 +178,8 @@ export function LiveChart() {
   const [micError,  setMicError]  = useState<string | null>(null)
   const [bands,      setBands]     = useState<number[]>([])
   const [tramScore,  setTramScore] = useState<number>(0)
-  const [manualTags, setManualTags] = useState<number[]>([])   // manual tram timestamps
-  const [tagFlash,   setTagFlash]   = useState(false)          // brief "Tagged!" feedback
+  const [manualTags, setManualTags] = useState<ManualTag[]>([])
+  const [tagFlash,   setTagFlash]   = useState(false)
   const [, startTransition] = useTransition()
 
   const streamRef      = useRef<MediaStream | null>(null)
@@ -131,6 +192,7 @@ export function LiveChart() {
   const lastTickMs     = useRef<number>(0)   // display throttle
   const lastStoreMs    = useRef<number>(0)   // storage throttle (1/s)
   const currentDbRef   = useRef<number | null>(null)  // latest mic dB for tagging
+  const micPointsRef   = useRef<ChartPoint[]>([])    // snapshot of mic readings for passage detection
 
   // Day/night ES II limit
   const limit = useMemo(() => {
@@ -181,16 +243,37 @@ export function LiveChart() {
     return () => { clearInterval(t1); clearInterval(t2) }
   }, [fetchLive, fetchSchedule])
 
+  // Keep ref in sync so tagTram can read it without a stale closure
+  useEffect(() => { micPointsRef.current = micPoints }, [micPoints])
+
   // ── Manual tram tag ───────────────────────────────────────────────────────
   const tagTram = useCallback(() => {
-    const tsMs = Date.now()
-    const db   = currentDbRef.current
-    setManualTags(prev => [...prev.filter(t => t >= tsMs - HISTORY_MS), tsMs])
+    const tagMs = Date.now()
+    // Detect actual passage bounds by walking the noise envelope around the tag
+    const { startMs, endMs } = detectPassageBounds(micPointsRef.current, tagMs)
+
+    setManualTags(prev => [
+      ...prev.filter(t => t.tagMs >= tagMs - HISTORY_MS),
+      { tagMs, startMs, endMs },
+    ])
     setTagFlash(true)
-    setTimeout(() => setTagFlash(false), 1200)
-    // Flush tag reading to DB — marks the reading as a confirmed tram passage
-    if (db !== null) {
-      flushBuf.current.push({ ts: new Date(tsMs).toISOString(), db_raw: db, tram_flag: true })
+    setTimeout(() => setTagFlash(false), 1500)
+
+    // Flush every reading within the detected passage window as tram_flag=true
+    const passagePoints = micPointsRef.current.filter(
+      p => p.int !== null && p.tsMs >= startMs && p.tsMs <= endMs
+    )
+    for (const p of passagePoints) {
+      flushBuf.current.push({
+        ts:        new Date(p.tsMs).toISOString(),
+        db_raw:    p.int as number,
+        tram_flag: true,
+      })
+    }
+    // Always include the exact tag moment in case passagePoints was empty
+    const db = currentDbRef.current
+    if (db !== null && !passagePoints.some(p => Math.abs(p.tsMs - tagMs) < 500)) {
+      flushBuf.current.push({ ts: new Date(tagMs).toISOString(), db_raw: db, tram_flag: true })
     }
   }, [])
 
@@ -222,6 +305,7 @@ export function LiveChart() {
     setBands([])
     setTramScore(0)
     setManualTags([])
+    micPointsRef.current = []
   }, [])
 
   // Cleanup on unmount
@@ -522,24 +606,25 @@ export function LiveChart() {
               />
             ))}
 
-            {/* Manual tram tags — bright vertical marker with ±5 s highlight */}
-            {manualTags.filter(t => t >= domainMin && t <= domainMax).map((t, i) => (
+            {/* Manual tram tags — detected passage band + anchor line at tag moment */}
+            {manualTags.filter(t => t.endMs >= domainMin && t.startMs <= domainMax).map((t, i) => (
               <ReferenceArea
-                key={`tag-band-${t}-${i}`}
-                x1={t - 5000}
-                x2={t + 5000}
-                fill="rgba(251,191,36,0.12)"
-                stroke="none"
+                key={`tag-band-${t.tagMs}-${i}`}
+                x1={t.startMs}
+                x2={t.endMs}
+                fill="rgba(251,191,36,0.15)"
+                stroke="rgba(251,191,36,0.4)"
+                strokeWidth={1}
               />
             ))}
-            {manualTags.filter(t => t >= domainMin && t <= domainMax).map((t, i) => (
+            {manualTags.filter(t => t.tagMs >= domainMin && t.tagMs <= domainMax).map((t, i) => (
               <ReferenceLine
-                key={`tag-${t}-${i}`}
-                x={t}
+                key={`tag-line-${t.tagMs}-${i}`}
+                x={t.tagMs}
                 stroke="#fbbf24"
-                strokeWidth={2}
+                strokeWidth={1.5}
                 strokeDasharray="4 2"
-                label={{ value: '✦ tram', position: 'insideTopLeft', fill: '#fbbf24', fontSize: 9, fontWeight: 700 }}
+                label={{ value: '✦ tagged', position: 'insideTopLeft', fill: '#fbbf24', fontSize: 9, fontWeight: 700 }}
               />
             ))}
 
@@ -595,8 +680,8 @@ export function LiveChart() {
         </span>
         {manualTags.length > 0 && (
           <span className="flex items-center gap-1.5">
-            <span className="inline-block w-4 h-px border-t-2 border-dashed border-amber-400" />
-            Tagged ({manualTags.length})
+            <span className="inline-block w-4 h-2 rounded-sm bg-amber-400/20 border border-amber-400/50" />
+            Tagged passage ({manualTags.length})
           </span>
         )}
         {Array.from(new Set(schedule.map(d => d.line))).map(line => (
