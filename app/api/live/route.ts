@@ -30,7 +30,11 @@ export async function GET() {
       interior: interior.reverse(),
       fetched_at: new Date().toISOString(),
     })
-  } catch (err) {
+  } catch (err: unknown) {
+    // Table doesn't exist yet — return empty (setup hasn't been run)
+    if (err && typeof err === 'object' && 'code' in err && err.code === '42P01') {
+      return NextResponse.json({ exterior: [], interior: [], fetched_at: new Date().toISOString() })
+    }
     console.error('Live API error:', err)
     return NextResponse.json({ error: 'Database error', detail: String(err) }, { status: 503 })
   }

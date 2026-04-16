@@ -236,6 +236,8 @@ export function LiveChart() {
     <div className="flex items-center justify-center h-72 text-muted-foreground text-sm">{error}</div>
   )
 
+  const hasData = points.length > 0 || micPoints.length > 0
+
   const nowMs      = Date.now()
   const domainMin  = nowMs - HISTORY_MS
   const domainMax  = nowMs + FUTURE_MS
@@ -276,8 +278,16 @@ export function LiveChart() {
         </div>
       </div>
 
+      {/* Empty state */}
+      {!hasData && !micActive && (
+        <div className="flex flex-col items-center justify-center h-72 gap-2 text-muted-foreground text-sm">
+          <span>No sensor data yet.</span>
+          <span className="text-xs">Click <strong className="text-foreground">Use mic</strong> above to start monitoring from this device.</span>
+        </div>
+      )}
+
       {/* Chart */}
-      <ResponsiveContainer width="100%" height={340}>
+      {(hasData || micActive) && <ResponsiveContainer width="100%" height={340}>
         <ComposedChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="4 4" stroke="hsl(216 34% 14%)" />
 
@@ -380,7 +390,7 @@ export function LiveChart() {
             connectNulls={false}
           />
         </ComposedChart>
-      </ResponsiveContainer>
+      </ResponsiveContainer>}
 
       {/* Legend */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-2 text-xs text-muted-foreground">

@@ -38,10 +38,40 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const calibRows = await sql`
-    SELECT offset_db FROM calibrations WHERE active = TRUE ORDER BY created_at DESC LIMIT 1
+  // Auto-create tables on first use (before /api/setup is run)
+  await sql`
+    CREATE TABLE IF NOT EXISTS readings (
+      id        BIGSERIAL PRIMARY KEY,
+      ts        TIMESTAMPTZ NOT NULL,
+      source    TEXT NOT NULL CHECK (source IN ('exterior','interior')),
+      db_raw    REAL NOT NULL,
+      db_cal    REAL,
+      tram_flag BOOLEAN DEFAULT FALSE,
+      tram_line TEXT,
+      tram_stop TEXT,
+      tram_dir  TEXT
+    )
   `
-  const offsetDb: number = calibRows.length > 0 ? (calibRows[0].offset_db as number) : 0
+  await sql`
+    CREATE TABLE IF NOT EXISTS calibrations (
+      id           SERIAL PRIMARY KEY,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      duration_sec INT NOT NULL,
+      ext_mean_db  REAL NOT NULL,
+      int_mean_db  REAL NOT NULL,
+      offset_db    REAL NOT NULL,
+      active       BOOLEAN DEFAULT TRUE,
+      notes        TEXT
+    )
+  `
+
+  let offsetDb = 0
+  try {
+    const calibRows = await sql`
+      SELECT offset_db FROM calibrations WHERE active = TRUE ORDER BY created_at DESC LIMIT 1
+    `
+    if (calibRows.length > 0) offsetDb = calibRows[0].offset_db as number
+  } catch { /* non-fatal */ }
 
   let inserted = 0
   for (const r of body.readings) {
@@ -49,7 +79,6 @@ export async function POST(req: NextRequest) {
     await sql`
       INSERT INTO readings (ts, source, db_raw, db_cal, tram_flag)
       VALUES (${r.ts}, 'interior', ${r.db_raw}, ${dbCal}, FALSE)
-      ON CONFLICT DO NOTHING
     `
     inserted++
   }

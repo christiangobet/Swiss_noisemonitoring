@@ -89,7 +89,11 @@ export async function GET(req: NextRequest) {
 
     const rows = rawRows as unknown as Reading[]
     return NextResponse.json({ readings: rows, count: rows.length })
-  } catch (err) {
+  } catch (err: unknown) {
+    // Table doesn't exist yet — return empty instead of 503
+    if (err && typeof err === 'object' && 'code' in err && err.code === '42P01') {
+      return NextResponse.json({ readings: [], count: 0 })
+    }
     console.error('Readings API error:', err)
     return NextResponse.json({ error: 'Database error', detail: String(err) }, { status: 503 })
   }
