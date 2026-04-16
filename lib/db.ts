@@ -10,12 +10,13 @@ const DATABASE_URL =
 
 export const sql = neon(DATABASE_URL)
 
-// Pool client for multi-statement DDL (used in /api/setup)
+// Pool client for multi-statement DDL (used in /api/setup).
+// Uses the non-pooling direct URL so PgBouncer transaction mode doesn't
+// interfere with CREATE TABLE / CREATE INDEX statements.
 export function createPool() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error('DATABASE_URL environment variable is not set')
-  }
-  return new Pool({ connectionString: process.env.DATABASE_URL })
+  const url = process.env.DATABASE_URL_UNPOOLED ?? process.env.DATABASE_URL
+  if (!url) throw new Error('DATABASE_URL environment variable is not set')
+  return new Pool({ connectionString: url })
 }
 
 // Schema migration SQL — all tables created idempotently
