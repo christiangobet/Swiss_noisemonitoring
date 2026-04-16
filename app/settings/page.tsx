@@ -170,13 +170,18 @@ export default function SettingsPage() {
           })),
         }),
       })
+      const data = await res.json()
       if (res.ok) {
         toast({ title: 'Platforms saved', description: `${selectedStops.size} platform(s) active` })
         await fetchActiveStops()
         setSearchResults([])
         setConfiguring(false)
       } else {
-        toast({ title: 'Error', description: 'Failed to save', variant: 'destructive' })
+        toast({
+          title: 'Save failed',
+          description: data.detail ?? data.error ?? `HTTP ${res.status}`,
+          variant: 'destructive',
+        })
       }
     } catch { /* ignore */ } finally {
       setSavingStops(false)

@@ -30,6 +30,20 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    // Ensure the table exists (idempotent — safe to run on every call)
+    await sql`
+      CREATE TABLE IF NOT EXISTS tram_stops_config (
+        id           SERIAL PRIMARY KEY,
+        stop_id      TEXT NOT NULL UNIQUE,
+        stop_name    TEXT NOT NULL,
+        line         TEXT NOT NULL DEFAULT '',
+        direction_id INT,
+        headsign     TEXT,
+        platform     TEXT,
+        active       BOOLEAN DEFAULT TRUE
+      )
+    `
+
     // Deactivate all existing active stops
     await sql`UPDATE tram_stops_config SET active = FALSE`
 
