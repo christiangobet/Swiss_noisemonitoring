@@ -66,19 +66,34 @@ const MIC_FLUSH_MS    = 10000  // flush to DB every 10 s (10 readings/batch)
 const DB_OFFSET       = 94     // dBFS → rough dBSPL
 
 // ── Frequency analysis ────────────────────────────────────────────────────────
-// 8 octave bands from 63 Hz to 8 kHz
-const BANDS = [
-  { label: '63',   fMin:   45, fMax:   90 },  // sub-bass
-  { label: '125',  fMin:   90, fMax:  180 },  // bass       ← tram wheel-rail
-  { label: '250',  fMin:  180, fMax:  355 },  // low-mid    ← tram rail/motor
-  { label: '500',  fMin:  355, fMax:  710 },  // mid
-  { label: '1k',   fMin:  710, fMax: 1400 },  // upper-mid
-  { label: '2k',   fMin: 1400, fMax: 2800 },  // presence   ← speech
-  { label: '4k',   fMin: 2800, fMax: 5600 },  // brilliance ← speech
-  { label: '8k',   fMin: 5600, fMax: 11200 }, // air
-] as const
-// Bands 1 & 2 (125 Hz, 250 Hz) are the tram fingerprint
-const TRAM_BAND_IDX = new Set([1, 2])
+// 8 octave bands. Groups follow acoustic research on tram noise:
+//   low     → broadband mechanical base (not very discriminative on its own)
+//   rolling → impact/rolling noise 500–1 kHz
+//   squeal  → squeal / tonal peaks 1–5 kHz  ← most discriminative
+//   flange  → flanging / broadband >5 kHz
+
+type BandGroup = 'low' | 'rolling' | 'squeal' | 'flange'
+
+const BANDS: Array<{ label: string; fMin: number; fMax: number; group: BandGroup }> = [
+  { label: '63',  fMin:   45, fMax:   90, group: 'low'     },
+  { label: '125', fMin:   90, fMax:  180, group: 'low'     },
+  { label: '250', fMin:  180, fMax:  355, group: 'low'     },
+  { label: '500', fMin:  355, fMax:  710, group: 'rolling' },
+  { label: '1k',  fMin:  710, fMax: 1400, group: 'rolling' },
+  { label: '2k',  fMin: 1400, fMax: 2800, group: 'squeal'  },
+  { label: '4k',  fMin: 2800, fMax: 5600, group: 'squeal'  },
+  { label: '8k',  fMin: 5600, fMax: 11200, group: 'flange' },
+]
+
+const GROUP_COLOR: Record<BandGroup, string> = {
+  low:     '#64748b',  // slate  — not used in score
+  rolling: '#f97316',  // orange — rolling/impact
+  squeal:  '#eab308',  // yellow — squeal, most discriminative
+  flange:  '#ef4444',  // red    — flanging / broadband HF
+}
+
+// Baseline window: 60 s × 4 frames/s = 240 frames (20th-percentile → ambient floor)
+const BASELINE_FRAMES = 240
 
 function computeBands(freqData: Float32Array<ArrayBuffer>, sampleRate: number): number[] {
   const binHz = sampleRate / (freqData.length * 2)
@@ -91,14 +106,29 @@ function computeBands(freqData: Float32Array<ArrayBuffer>, sampleRate: number): 
   })
 }
 
-// Score 0-100: how "tram-like" is the spectrum?
-// Trams: dominant energy in 125-250 Hz vs 1-4 kHz (speech band)
-function computeTramScore(bands: number[]): number {
-  const tramPwr   = Math.pow(10, bands[1] / 10) + Math.pow(10, bands[2] / 10)
-  const speechPwr = Math.pow(10, bands[5] / 10) + Math.pow(10, bands[6] / 10)
-  const ratio = tramPwr / (speechPwr + 1e-10)
-  // ratio > 4 → very tram-like, ratio < 0.5 → speech/music
-  return Math.round(Math.min(100, Math.max(0, (ratio - 0.3) / 4.7 * 100)))
+interface TramScore { score: number; rolling: number; squeal: number; flange: number }
+
+// Relative detection: compare band power against the rolling ambient baseline.
+// Each sub-score measures how much that mechanism is elevated above ambient.
+// Ratio 1.5× ≈ +2 dB → 0 %; ratio 10× ≈ +10 dB → 100 %.
+// Combined score weights squeal highest (most discriminative).
+function computeTramScore(bands: number[], baseline: number[]): TramScore {
+  if (baseline.length < BANDS.length) return { score: 0, rolling: 0, squeal: 0, flange: 0 }
+
+  const elevation = (idxs: number[]) => {
+    const cur = idxs.reduce((s, i) => s + Math.pow(10, bands[i]    / 10), 0)
+    const bas = idxs.reduce((s, i) => s + Math.pow(10, baseline[i] / 10), 0)
+    const ratio = cur / (bas + 1e-10)
+    return Math.round(Math.min(100, Math.max(0, (ratio - 1.5) / 8.5 * 100)))
+  }
+
+  const rolling = elevation([3, 4])   // 500 Hz – 1 kHz  impact / rolling
+  const squeal  = elevation([5, 6])   // 1–5 kHz          squeal (most discriminative)
+  const flange  = elevation([7])      // >5 kHz            flanging / broadband HF
+
+  // Weighted sum; all three must contribute to avoid single-band false positives
+  const score = Math.round(0.40 * squeal + 0.35 * rolling + 0.25 * flange)
+  return { score, rolling, squeal, flange }
 }
 
 /**
@@ -178,7 +208,7 @@ export function LiveChart() {
   const [micError,     setMicError]     = useState<string | null>(null)
   const [micSaveError, setMicSaveError] = useState<string | null>(null)
   const [bands,      setBands]     = useState<number[]>([])
-  const [tramScore,  setTramScore] = useState<number>(0)
+  const [tramScore,  setTramScore] = useState<TramScore>({ score: 0, rolling: 0, squeal: 0, flange: 0 })
   const [manualTags, setManualTags] = useState<ManualTag[]>([])
   const [tagFlash,   setTagFlash]   = useState(false)
   const [, startTransition] = useTransition()
@@ -192,8 +222,9 @@ export function LiveChart() {
   const flushBuf       = useRef<Array<{ ts: string; db_raw: number; tram_flag?: boolean }>>([])
   const lastTickMs     = useRef<number>(0)   // display throttle
   const lastStoreMs    = useRef<number>(0)   // storage throttle (1/s)
-  const currentDbRef   = useRef<number | null>(null)  // latest mic dB for tagging
-  const micPointsRef   = useRef<ChartPoint[]>([])    // snapshot of mic readings for passage detection
+  const currentDbRef   = useRef<number | null>(null)
+  const micPointsRef   = useRef<ChartPoint[]>([])
+  const bandHistoryRef = useRef<number[][]>([])       // rolling band history for ambient baseline
 
   // Day/night ES II limit
   const limit = useMemo(() => {
@@ -314,7 +345,8 @@ export function LiveChart() {
     setMicPoints([])
     setMicSaveError(null)
     setBands([])
-    setTramScore(0)
+    setTramScore({ score: 0, rolling: 0, squeal: 0, flange: 0 })
+    bandHistoryRef.current = []
     setManualTags([])
     micPointsRef.current = []
   }, [])
@@ -382,12 +414,24 @@ export function LiveChart() {
               return [...prev.filter(p => p.tsMs >= cutoff), { tsMs, ext: null, int: db }]
             })
           }
-          // Frequency analysis
+          // Frequency analysis with rolling ambient baseline
           if (freqBufRef.current) {
             node.getFloatFrequencyData(freqBufRef.current)
             const bv = computeBands(freqBufRef.current, actx.sampleRate)
+
+            // Accumulate band history (60-second window at 250 ms rate)
+            bandHistoryRef.current.push([...bv])
+            if (bandHistoryRef.current.length > BASELINE_FRAMES) bandHistoryRef.current.shift()
+
+            // Baseline = 20th-percentile per band (ambient floor, not skewed by tram passages)
+            const baseline = BANDS.map((_, bi) => {
+              if (bandHistoryRef.current.length < 4) return -80
+              const col = bandHistoryRef.current.map(f => f[bi]).sort((a, b) => a - b)
+              return col[Math.floor(col.length * 0.20)]
+            })
+
             setBands(bv)
-            setTramScore(computeTramScore(bv))
+            setTramScore(computeTramScore(bv, baseline))
           }
         }
 
@@ -518,32 +562,44 @@ export function LiveChart() {
         <div className="px-1 space-y-1">
           <div className="flex items-end gap-[3px] h-10">
             {bands.map((db, i) => {
-              const isTram = TRAM_BAND_IDX.has(i)
-              // Normalise –120…0 dBFS to 0–100%
+              const fill = GROUP_COLOR[BANDS[i].group]
               const pct  = Math.max(0, Math.min(100, (db + 100) / 80 * 100))
-              const fill = isTram ? '#F59E0B' : '#60A5FA'
               return (
-                <div key={i} className="flex-1 flex flex-col items-center gap-0.5">
+                <div key={i} className="flex-1">
                   <div className="w-full rounded-sm" style={{ height: `${pct}%`, backgroundColor: fill, minHeight: 2 }} />
                 </div>
               )
             })}
           </div>
-          {/* Band labels + tram score */}
-          <div className="flex items-center gap-[3px]">
+
+          {/* Band labels */}
+          <div className="flex gap-[3px]">
             {BANDS.map((b, i) => (
               <span key={i} className="flex-1 text-center text-[8px] text-muted-foreground leading-none">
                 {b.label}
               </span>
             ))}
+          </div>
+
+          {/* Per-mechanism scores + combined tram score */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[10px]" style={{ color: GROUP_COLOR.rolling }}>
+              Roll {tramScore.rolling}%
+            </span>
+            <span className="text-[10px]" style={{ color: GROUP_COLOR.squeal }}>
+              Squeal {tramScore.squeal}%
+            </span>
+            <span className="text-[10px]" style={{ color: GROUP_COLOR.flange }}>
+              Flange {tramScore.flange}%
+            </span>
             <span
-              className="ml-2 shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded"
+              className="ml-auto shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded"
               style={{
-                backgroundColor: tramScore >= 60 ? '#F59E0B22' : tramScore >= 30 ? '#60A5FA22' : '#4ade8022',
-                color:            tramScore >= 60 ? '#F59E0B'   : tramScore >= 30 ? '#60A5FA'   : '#4ade80',
+                backgroundColor: tramScore.score >= 60 ? '#ef444422' : tramScore.score >= 30 ? '#eab30822' : '#64748b22',
+                color:            tramScore.score >= 60 ? '#ef4444'   : tramScore.score >= 30 ? '#eab308'   : '#64748b',
               }}
             >
-              Tram {tramScore}%
+              Tram {tramScore.score}%
             </span>
           </div>
         </div>
