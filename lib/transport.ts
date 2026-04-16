@@ -85,9 +85,13 @@ export async function getStationboardTrams(stopId: string, limit = 20, tramOnly 
       return cat === 't' || cat === 'tram' || cat === 'tramway'
     })
     .map(d => {
-      // `name` is the display name e.g. "T 3" — strip the letter prefix to get the line number.
-      // Fall back to `number` which may be service/trip number on some responses.
-      const lineFromName = (d.name ?? '').replace(/^[A-Za-z]+\s*/, '').trim()
+      // `name` is the display name e.g. "T 3" or "T 3 18558" — strip the letter
+      // prefix then take only the first token (avoids service numbers in the tail).
+      // Fall back to `number` which for VBZ is typically the line number.
+      const lineFromName = (d.name ?? '')
+        .replace(/^[A-Za-z]+\s*/, '')  // strip letter prefix e.g. "T "
+        .split(/\s+/)[0]               // first token only — ignores trip suffix
+        .trim()
       const sched = fixIsoOffset(d.stop?.departure ?? '')
       const prog  = fixIsoOffset(d.stop?.prognosis?.departure ?? '')
       return {

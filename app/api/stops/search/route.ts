@@ -35,11 +35,19 @@ export async function GET(req: NextRequest) {
           const entry = lineMap.get(t.line)!
           if (entry.directions.size < 3) entry.directions.add(t.direction)
         }
-        const lines_detail = Array.from(lineMap.entries()).map(([line, { category, directions }]) => ({
-          line,
-          category,
-          directions: Array.from(directions),
-        }))
+        const lines_detail = Array.from(lineMap.entries())
+          .map(([line, { category, directions }]) => ({
+            line,
+            category,
+            directions: Array.from(directions),
+          }))
+          // Sort: numeric lines first (2, 3, 4…), then alphanumeric (N1, N2…)
+          .sort((a, b) => {
+            const na = parseInt(a.line, 10)
+            const nb = parseInt(b.line, 10)
+            if (!isNaN(na) && !isNaN(nb)) return na - nb
+            return a.line.localeCompare(b.line)
+          })
         return { ...station, lines, directions, lines_detail, is_tram_stop: trams.length > 0 }
       })
     )
