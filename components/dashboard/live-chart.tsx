@@ -53,7 +53,7 @@ function withAlpha(hex: string, a: number) {
 // ── Constants ─────────────────────────────────────────────────────────────────
 const HISTORY_MS    = 3 * 60 * 1000  // 3 min history
 const FUTURE_MS     = 2 * 60 * 1000  // 2 min future
-const TRAM_PAD_MS   = 15 * 1000      // ±15 s tram band
+const TRAM_PAD_MS   = 20 * 1000      // ±20 s tram band
 const CHART_TICK_MS = 250            // chart update rate
 const MIC_FLUSH_MS  = 2000           // DB flush interval
 const DB_OFFSET     = 94             // dBFS → rough dBSPL
@@ -351,36 +351,34 @@ export function LiveChart() {
               ]}
             />
 
-            {/* Tram departure bands + exact-time markers */}
-            {visibleTrams.map((dep, i) => {
-              const ms    = new Date(dep.expected).getTime()
-              const color = lineColor(dep.line)
-              const label = `${dep.line} → ${dep.direction.split(' ').slice(0, 2).join(' ')}`
-              return [
-                // ±15 s shaded band
-                <ReferenceArea
-                  key={`band-${dep.line}-${dep.expected}-${i}`}
-                  x1={ms - TRAM_PAD_MS}
-                  x2={ms + TRAM_PAD_MS}
-                  fill={withAlpha(color, 0.18)}
-                  stroke="none"
-                />,
-                // Exact departure line + label
-                <ReferenceLine
-                  key={`line-${dep.line}-${dep.expected}-${i}`}
-                  x={ms}
-                  stroke={color}
-                  strokeWidth={1.5}
-                  label={{
-                    value: label,
-                    position: 'insideTopRight',
-                    fill: color,
-                    fontSize: 9,
-                    fontWeight: 700,
-                  }}
-                />,
-              ]
-            })}
+            {/* ±20 s shaded band per tram */}
+            {visibleTrams.map((dep, i) => (
+              <ReferenceArea
+                key={`band-${dep.line}-${dep.expected}-${i}`}
+                x1={new Date(dep.expected).getTime() - TRAM_PAD_MS}
+                x2={new Date(dep.expected).getTime() + TRAM_PAD_MS}
+                fill={withAlpha(lineColor(dep.line), 0.22)}
+                stroke={withAlpha(lineColor(dep.line), 0.5)}
+                strokeWidth={1}
+              />
+            ))}
+
+            {/* Exact departure line + label per tram */}
+            {visibleTrams.map((dep, i) => (
+              <ReferenceLine
+                key={`vline-${dep.line}-${dep.expected}-${i}`}
+                x={new Date(dep.expected).getTime()}
+                stroke={lineColor(dep.line)}
+                strokeWidth={1.5}
+                label={{
+                  value: `${dep.line} → ${dep.direction.split(' ').slice(0, 2).join(' ')}`,
+                  position: 'insideTopRight',
+                  fill: lineColor(dep.line),
+                  fontSize: 9,
+                  fontWeight: 700,
+                }}
+              />
+            ))}
 
             {/* ES II noise limit */}
             <ReferenceLine
