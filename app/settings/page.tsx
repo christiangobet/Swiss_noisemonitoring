@@ -58,8 +58,14 @@ export default function SettingsPage() {
   const fetchGtfsMeta = useCallback(async () => {
     setGtfsLoading(true)
     try {
-      // We'll infer from /api/calibration which also returns sensor state
-      const calibRes = await fetch('/api/calibration')
+      const [metaRes, calibRes] = await Promise.all([
+        fetch('/api/gtfs/meta'),
+        fetch('/api/calibration'),
+      ])
+      if (metaRes.ok) {
+        const data = await metaRes.json()
+        setGtfsMeta(data.meta ?? null)
+      }
       if (calibRes.ok) {
         const data = await calibRes.json()
         setSensors({
@@ -143,7 +149,13 @@ export default function SettingsPage() {
       const data = await res.json()
       if (res.ok) {
         toast({ title: 'GTFS refreshed', description: `${data.tram_stops_upserted} stops loaded` })
-        fetchGtfsMeta()
+        // Update meta from refresh response directly
+        setGtfsMeta({
+          fetched_at:   new Date().toISOString(),
+          feed_version: data.feed_version ?? null,
+          valid_from:   data.valid_from ?? null,
+          valid_to:     data.valid_to   ?? null,
+        })
       } else {
         toast({ title: 'GTFS refresh failed', description: data.error, variant: 'destructive' })
       }

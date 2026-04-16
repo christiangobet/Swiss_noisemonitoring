@@ -21,26 +21,30 @@ export async function GET(req: NextRequest) {
       LIMIT 100
     `
 
-    // Group by stop_name so the UI can show platforms together
+    // Group by stop_name+line so each tram line appears as its own group
     const grouped = new Map<string, typeof rows>()
     for (const row of rows) {
-      const key = row.stop_name as string
+      const key = `${row.stop_name as string}||${row.line as string}`
       if (!grouped.has(key)) grouped.set(key, [])
       grouped.get(key)!.push(row)
     }
 
-    const results = Array.from(grouped.entries()).map(([stop_name, platforms]) => ({
-      stop_name,
-      platforms: platforms.map(p => ({
-        stop_id:     p.stop_id,
-        stop_name:   p.stop_name,
-        line:        p.line,
-        direction_id: p.direction_id,
-        headsign:    p.headsign,
-        platform:    p.platform,
-        active:      p.active,
-      })),
-    }))
+    const results = Array.from(grouped.entries()).map(([key, platforms]) => {
+      const [stop_name] = key.split('||')
+      return {
+        stop_name,
+        line: platforms[0].line as string,
+        platforms: platforms.map(p => ({
+          stop_id:     p.stop_id,
+          stop_name:   p.stop_name,
+          line:        p.line,
+          direction_id: p.direction_id,
+          headsign:    p.headsign,
+          platform:    p.platform,
+          active:      p.active,
+        })),
+      }
+    })
 
     return NextResponse.json({ results, count: results.length, query: q })
   } catch (err) {
