@@ -1,16 +1,20 @@
-import { neon, neonConfig, Pool } from '@neondatabase/serverless'
+import { neon, Pool } from '@neondatabase/serverless'
 
-// Disable connection caching for serverless edge environments
-neonConfig.fetchConnectionCache = true
+// Neon does not validate the connection string at initialisation time — only at
+// first query. Providing a placeholder URL makes the module safe to import during
+// Next.js build without DATABASE_URL being set. All routes use `force-dynamic`
+// so no queries run at build time; a missing env var will surface as a clear
+// runtime error on the first actual request.
+const DATABASE_URL =
+  process.env.DATABASE_URL ?? 'postgresql://build-placeholder:x@placeholder/db'
 
-if (!process.env.DATABASE_URL) {
-  throw new Error('DATABASE_URL environment variable is not set')
-}
-
-export const sql = neon(process.env.DATABASE_URL)
+export const sql = neon(DATABASE_URL)
 
 // Pool client for multi-statement DDL (used in /api/setup)
 export function createPool() {
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL environment variable is not set')
+  }
   return new Pool({ connectionString: process.env.DATABASE_URL })
 }
 
