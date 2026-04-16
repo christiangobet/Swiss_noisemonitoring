@@ -59,7 +59,42 @@ const STORAGE_TICK_MS = 1000   // one sample/s written to DB (10× fewer writes)
 const MIC_FLUSH_MS    = 10000  // flush to DB every 10 s (10 readings/batch)
 const DB_OFFSET       = 94     // dBFS → rough dBSPL
 
-// Returns dB or null when audio context is suspended / signal is zero
+// ── Frequency analysis ────────────────────────────────────────────────────────
+// 8 octave bands from 63 Hz to 8 kHz
+const BANDS = [
+  { label: '63',   fMin:   45, fMax:   90 },  // sub-bass
+  { label: '125',  fMin:   90, fMax:  180 },  // bass       ← tram wheel-rail
+  { label: '250',  fMin:  180, fMax:  355 },  // low-mid    ← tram rail/motor
+  { label: '500',  fMin:  355, fMax:  710 },  // mid
+  { label: '1k',   fMin:  710, fMax: 1400 },  // upper-mid
+  { label: '2k',   fMin: 1400, fMax: 2800 },  // presence   ← speech
+  { label: '4k',   fMin: 2800, fMax: 5600 },  // brilliance ← speech
+  { label: '8k',   fMin: 5600, fMax: 11200 }, // air
+] as const
+// Bands 1 & 2 (125 Hz, 250 Hz) are the tram fingerprint
+const TRAM_BAND_IDX = new Set([1, 2])
+
+function computeBands(freqData: Float32Array<ArrayBuffer>, sampleRate: number): number[] {
+  const binHz = sampleRate / (freqData.length * 2)
+  return BANDS.map(({ fMin, fMax }) => {
+    const lo = Math.max(0, Math.floor(fMin / binHz))
+    const hi = Math.min(freqData.length - 1, Math.ceil(fMax / binHz))
+    let power = 0; let n = 0
+    for (let i = lo; i <= hi; i++) { power += Math.pow(10, freqData[i] / 10); n++ }
+    return n > 0 ? 10 * Math.log10(power / n) : -120
+  })
+}
+
+// Score 0-100: how "tram-like" is the spectrum?
+// Trams: dominant energy in 125-250 Hz vs 1-4 kHz (speech band)
+function computeTramScore(bands: number[]): number {
+  const tramPwr   = Math.pow(10, bands[1] / 10) + Math.pow(10, bands[2] / 10)
+  const speechPwr = Math.pow(10, bands[5] / 10) + Math.pow(10, bands[6] / 10)
+  const ratio = tramPwr / (speechPwr + 1e-10)
+  // ratio > 4 → very tram-like, ratio < 0.5 → speech/music
+  return Math.round(Math.min(100, Math.max(0, (ratio - 0.3) / 4.7 * 100)))
+}
+
 function getRmsDb(analyser: AnalyserNode): number | null {
   const buf = new Float32Array(analyser.fftSize)
   analyser.getFloatTimeDomainData(buf)
@@ -80,10 +115,13 @@ export function LiveChart() {
   const [micActive, setMicActive] = useState(false)
   const [micDb,     setMicDb]     = useState<number | null>(null)
   const [micError,  setMicError]  = useState<string | null>(null)
+  const [bands,     setBands]     = useState<number[]>([])
+  const [tramScore, setTramScore] = useState<number>(0)
 
   const streamRef      = useRef<MediaStream | null>(null)
   const ctxRef         = useRef<AudioContext | null>(null)
   const analyserRef    = useRef<AnalyserNode | null>(null)
+  const freqBufRef     = useRef<Float32Array<ArrayBuffer> | null>(null)
   const rafRef         = useRef<number>(0)
   const flushTimer     = useRef<ReturnType<typeof setInterval> | null>(null)
   const flushBuf       = useRef<Array<{ ts: string; db_raw: number }>>([])
@@ -145,13 +183,15 @@ export function LiveChart() {
     if (flushTimer.current) clearInterval(flushTimer.current)
     streamRef.current?.getTracks().forEach(t => t.stop())
     ctxRef.current?.close().catch(() => {})
-    streamRef.current = ctxRef.current = analyserRef.current = null
+    streamRef.current = ctxRef.current = analyserRef.current = freqBufRef.current = null
     flushBuf.current  = []
     lastTickMs.current  = 0
     lastStoreMs.current = 0
     setMicActive(false)
     setMicDb(null)
     setMicPoints([])
+    setBands([])
+    setTramScore(0)
   }, [])
 
   // Cleanup on unmount
@@ -189,6 +229,7 @@ export function LiveChart() {
       src.connect(analyser)
       ctxRef.current      = ctx
       analyserRef.current = analyser
+      freqBufRef.current  = new Float32Array(analyser.frequencyBinCount) as Float32Array<ArrayBuffer>
 
       // requestAnimationFrame loop — pauses automatically when tab is hidden,
       // no timer throttling, resumes cleanly when tab is visible again.
@@ -206,7 +247,7 @@ export function LiveChart() {
         // Update live dB readout every frame
         setMicDb(db)
 
-        // Update chart at display rate (smooth ECG)
+        // Update chart + spectrum at display rate (smooth ECG)
         if (tsMs - lastTickMs.current >= CHART_TICK_MS) {
           lastTickMs.current = tsMs
           if (db !== null) {
@@ -214,6 +255,13 @@ export function LiveChart() {
               const cutoff = tsMs - HISTORY_MS
               return [...prev.filter(p => p.tsMs >= cutoff), { tsMs, ext: null, int: db }]
             })
+          }
+          // Frequency analysis
+          if (freqBufRef.current) {
+            node.getFloatFrequencyData(freqBufRef.current)
+            const bv = computeBands(freqBufRef.current, actx.sampleRate)
+            setBands(bv)
+            setTramScore(computeTramScore(bv))
           }
         }
 
@@ -307,6 +355,42 @@ export function LiveChart() {
           {micError && <span className="text-xs text-destructive max-w-[200px] text-right">{micError}</span>}
         </div>
       </div>
+
+      {/* Frequency spectrum — only visible when mic is active and bands are populated */}
+      {micActive && bands.length === BANDS.length && (
+        <div className="px-1 space-y-1">
+          <div className="flex items-end gap-[3px] h-10">
+            {bands.map((db, i) => {
+              const isTram = TRAM_BAND_IDX.has(i)
+              // Normalise –120…0 dBFS to 0–100%
+              const pct  = Math.max(0, Math.min(100, (db + 100) / 80 * 100))
+              const fill = isTram ? '#F59E0B' : '#60A5FA'
+              return (
+                <div key={i} className="flex-1 flex flex-col items-center gap-0.5">
+                  <div className="w-full rounded-sm" style={{ height: `${pct}%`, backgroundColor: fill, minHeight: 2 }} />
+                </div>
+              )
+            })}
+          </div>
+          {/* Band labels + tram score */}
+          <div className="flex items-center gap-[3px]">
+            {BANDS.map((b, i) => (
+              <span key={i} className="flex-1 text-center text-[8px] text-muted-foreground leading-none">
+                {b.label}
+              </span>
+            ))}
+            <span
+              className="ml-2 shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded"
+              style={{
+                backgroundColor: tramScore >= 60 ? '#F59E0B22' : tramScore >= 30 ? '#60A5FA22' : '#4ade8022',
+                color:            tramScore >= 60 ? '#F59E0B'   : tramScore >= 30 ? '#60A5FA'   : '#4ade80',
+              }}
+            >
+              Tram {tramScore}%
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Empty state */}
       {!hasData && !micActive && (
