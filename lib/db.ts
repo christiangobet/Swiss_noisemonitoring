@@ -1,0 +1,146 @@
+import { neon, neonConfig, Pool } from '@neondatabase/serverless'
+
+// Disable connection caching for serverless edge environments
+neonConfig.fetchConnectionCache = true
+
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL environment variable is not set')
+}
+
+export const sql = neon(process.env.DATABASE_URL)
+
+// Pool client for multi-statement DDL (used in /api/setup)
+export function createPool() {
+  return new Pool({ connectionString: process.env.DATABASE_URL })
+}
+
+// Schema migration SQL — all tables created idempotently
+export const MIGRATION_SQL = `
+CREATE TABLE IF NOT EXISTS readings (
+  id          BIGSERIAL PRIMARY KEY,
+  ts          TIMESTAMPTZ NOT NULL,
+  source      TEXT NOT NULL CHECK (source IN ('exterior','interior')),
+  db_raw      REAL NOT NULL,
+  db_cal      REAL,
+  tram_flag   BOOLEAN DEFAULT FALSE,
+  tram_line   TEXT,
+  tram_stop   TEXT,
+  tram_dir    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS readings_ts_idx ON readings (ts DESC);
+CREATE INDEX IF NOT EXISTS readings_source_ts_idx ON readings (source, ts DESC);
+
+CREATE TABLE IF NOT EXISTS leq_minute (
+  minute_ts   TIMESTAMPTZ PRIMARY KEY,
+  leq_ext     REAL,
+  leq_int     REAL,
+  delta_db    REAL,
+  l10_ext     REAL,
+  l10_int     REAL,
+  l90_ext     REAL,
+  l90_int     REAL,
+  tram_events INT DEFAULT 0,
+  tram_lines  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS calibrations (
+  id           SERIAL PRIMARY KEY,
+  created_at   TIMESTAMPTZ DEFAULT NOW(),
+  duration_sec INT NOT NULL,
+  ext_mean_db  REAL NOT NULL,
+  int_mean_db  REAL NOT NULL,
+  offset_db    REAL NOT NULL,
+  active       BOOLEAN DEFAULT TRUE,
+  notes        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tram_stops_config (
+  id           SERIAL PRIMARY KEY,
+  stop_id      TEXT NOT NULL UNIQUE,
+  stop_name    TEXT NOT NULL,
+  line         TEXT NOT NULL,
+  direction_id INT,
+  headsign     TEXT,
+  platform     TEXT,
+  active       BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS gtfs_meta (
+  id           SERIAL PRIMARY KEY,
+  fetched_at   TIMESTAMPTZ DEFAULT NOW(),
+  feed_version TEXT,
+  valid_from   DATE,
+  valid_to     DATE
+);
+`
+
+// Types mirroring DB rows
+export interface Reading {
+  id: number
+  ts: string
+  source: 'exterior' | 'interior'
+  db_raw: number
+  db_cal: number | null
+  tram_flag: boolean
+  tram_line: string | null
+  tram_stop: string | null
+  tram_dir: string | null
+}
+
+export interface LeqMinute {
+  minute_ts: string
+  leq_ext: number | null
+  leq_int: number | null
+  delta_db: number | null
+  l10_ext: number | null
+  l10_int: number | null
+  l90_ext: number | null
+  l90_int: number | null
+  tram_events: number
+  tram_lines: string | null
+}
+
+export interface Calibration {
+  id: number
+  created_at: string
+  duration_sec: number
+  ext_mean_db: number
+  int_mean_db: number
+  offset_db: number
+  active: boolean
+  notes: string | null
+}
+
+export interface TramStopConfig {
+  id: number
+  stop_id: string
+  stop_name: string
+  line: string
+  direction_id: number | null
+  headsign: string | null
+  platform: string | null
+  active: boolean
+}
+
+export interface GtfsMeta {
+  id: number
+  fetched_at: string
+  feed_version: string | null
+  valid_from: string | null
+  valid_to: string | null
+}
+
+// Swiss noise limits (ES II residential zone, LSV)
+export const NOISE_LIMITS = {
+  day: 55,   // 06:00–22:00
+  night: 45, // 22:00–06:00
+} as const
+
+// Determine day/night based on Europe/Zurich local hour
+export function isNighttime(utcDate: Date): boolean {
+  const zurichHour = new Date(
+    utcDate.toLocaleString('en-US', { timeZone: 'Europe/Zurich' })
+  ).getHours()
+  return zurichHour < 6 || zurichHour >= 22
+}

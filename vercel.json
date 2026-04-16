@@ -1,0 +1,13 @@
+{
+  "crons": [
+    {
+      "path": "/api/gtfs/refresh",
+      "schedule": "0 3 * * 1"
+    }
+  ],
+  "functions": {
+    "app/api/gtfs/refresh/route.ts": {
+      "maxDuration": 300
+    }
+  }
+}
