@@ -6,13 +6,12 @@ import { sql } from '@/lib/db'
 import { parseCsv, VBZ_CKAN_API_URL, isTramRoute } from '@/lib/gtfs'
 import { unzipSync } from 'fflate'
 
-// GET — called by Vercel cron (x-vercel-cron header) or the Settings UI (no auth needed;
-// GTFS data is public and the operation is read-only / idempotent).
+// GET — called by Vercel cron or the Settings UI (no auth; GTFS data is public).
 export async function GET() {
   return runRefresh()
 }
 
-// POST — called from Pi side or external tooling; requires INGEST_SECRET.
+// POST — called from Pi or external tooling; requires INGEST_SECRET.
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get('x-api-key')
   if (process.env.INGEST_SECRET && apiKey !== process.env.INGEST_SECRET) {
@@ -21,9 +20,63 @@ export async function POST(req: NextRequest) {
   return runRefresh()
 }
 
+// ── Lean byte-level parser for stop_times.txt ─────────────────────────────────
+// Calling parseCsv() on stop_times.txt creates one JS object per row (millions
+// of rows for VBZ), which exhausts the 2 GB Vercel memory limit. Instead we
+// scan raw bytes, extract only trip_id and stop_id, and build a Map<stop_id, info>.
+function buildTramStopMap(
+  rawBytes: Uint8Array,
+  tramTripIds: Set<string>,
+  tripInfoMap: Map<string, { line: string; headsign: string; direction_id: number }>
+): Map<string, { line: string; headsign: string; direction_id: number }[]> {
+  const stopServiceMap = new Map<string, { line: string; headsign: string; direction_id: number }[]>()
+  const decoder = new TextDecoder('utf-8')
+  let tripIdIdx = -1
+  let stopIdIdx = -1
+  let headerParsed = false
+  let lineStart = 0
+
+  for (let i = 0; i <= rawBytes.length; i++) {
+    if (i === rawBytes.length || rawBytes[i] === 10 /* '\n' */) {
+      let lineEnd = i
+      // Strip trailing \r for CRLF files
+      if (lineEnd > lineStart && rawBytes[lineEnd - 1] === 13) lineEnd--
+
+      if (lineEnd > lineStart) {
+        // Decode only this one line — subarray is a zero-copy view
+        const line = decoder.decode(rawBytes.subarray(lineStart, lineEnd))
+
+        if (!headerParsed) {
+          const cols = line.split(',')
+          tripIdIdx = cols.indexOf('trip_id')
+          stopIdIdx = cols.indexOf('stop_id')
+          headerParsed = true
+        } else if (tripIdIdx >= 0 && stopIdIdx >= 0) {
+          const cols = line.split(',')
+          const tripId = cols[tripIdIdx]
+          const stopId = cols[stopIdIdx]
+          if (tripId && stopId && tramTripIds.has(tripId)) {
+            const info = tripInfoMap.get(tripId)
+            if (info) {
+              if (!stopServiceMap.has(stopId)) stopServiceMap.set(stopId, [])
+              const existing = stopServiceMap.get(stopId)!
+              if (!existing.some(e => e.line === info.line && e.direction_id === info.direction_id)) {
+                existing.push(info)
+              }
+            }
+          }
+        }
+      }
+      lineStart = i + 1
+    }
+  }
+
+  return stopServiceMap
+}
+
 async function runRefresh(): Promise<NextResponse> {
   try {
-    // ── 1. Discover the current GTFS ZIP URL via the CKAN API ────────────────
+    // ── 1. Discover the current GTFS ZIP URL via the CKAN API ─────────────────
     const ckanRes = await fetch(VBZ_CKAN_API_URL, {
       headers: { 'User-Agent': 'TramWatch/1.0' },
     })
@@ -40,7 +93,6 @@ async function runRefresh(): Promise<NextResponse> {
     if (!ckanData.success || !ckanData.result?.resources?.length) {
       return NextResponse.json({ error: 'CKAN API returned no resources' }, { status: 502 })
     }
-    // Pick the first ZIP resource (there is typically exactly one)
     const zipResource = ckanData.result.resources.find(
       r => r.url.toLowerCase().endsWith('.zip') || r.format.toUpperCase() === 'ZIP'
     )
@@ -52,7 +104,7 @@ async function runRefresh(): Promise<NextResponse> {
     }
     const gtfsZipUrl = zipResource.url
 
-    // ── 2. Fetch and unzip the VBZ GTFS feed ────────────────────────────────
+    // ── 2. Fetch and unzip ────────────────────────────────────────────────────
     const response = await fetch(gtfsZipUrl, {
       headers: { 'User-Agent': 'TramWatch/1.0' },
     })
@@ -66,23 +118,25 @@ async function runRefresh(): Promise<NextResponse> {
     const zipBuffer = new Uint8Array(await response.arrayBuffer())
     const files = unzipSync(zipBuffer)
 
-    const getFile = (name: string): string | null => {
+    // Helper: decode small files to string (safe for routes/trips/stops/calendar)
+    const getFileCsv = (name: string): string | null => {
       const entry = files[name]
       return entry ? new TextDecoder('utf-8').decode(entry) : null
     }
 
-    const routesCsv   = getFile('routes.txt')
-    const stopsCsv    = getFile('stops.txt')
-    const tripsCsv    = getFile('trips.txt')
-    const stopTimesCsv = getFile('stop_times.txt')
-    const calendarCsv = getFile('calendar.txt')
-    const feedInfoCsv = getFile('feed_info.txt')
+    const routesCsv   = getFileCsv('routes.txt')
+    const stopsCsv    = getFileCsv('stops.txt')
+    const tripsCsv    = getFileCsv('trips.txt')
+    const calendarCsv = getFileCsv('calendar.txt')
+    const feedInfoCsv = getFileCsv('feed_info.txt')
+    // stop_times.txt stays as Uint8Array — decoded per-line in buildTramStopMap
+    const stopTimesRaw = files['stop_times.txt'] ?? null
 
     if (!routesCsv || !stopsCsv || !tripsCsv) {
       return NextResponse.json({ error: 'Required GTFS files not found in ZIP' }, { status: 422 })
     }
 
-    // ── 2. Parse tram routes (route_type = 0) ───────────────────────────────
+    // ── 3. Parse tram routes (route_type 0 standard, 900 Swiss extended) ──────
     const routes = parseCsv(routesCsv)
     const tramRouteMap = new Map<string, string>() // route_id → route_short_name
     for (const r of routes) {
@@ -91,43 +145,33 @@ async function runRefresh(): Promise<NextResponse> {
       }
     }
 
-    // ── 3. Build trip_id → { line, headsign, direction_id } ─────────────────
+    // ── 4. Build trip_id → { line, headsign, direction_id } ──────────────────
     const trips = parseCsv(tripsCsv)
     const tripInfoMap = new Map<string, { line: string; headsign: string; direction_id: number }>()
+    const tramTripIds = new Set<string>()
     for (const t of trips) {
       if (!tramRouteMap.has(t.route_id)) continue
-      tripInfoMap.set(t.trip_id, {
+      const info = {
         line: tramRouteMap.get(t.route_id)!,
         headsign: t.trip_headsign ?? '',
         direction_id: parseInt(t.direction_id ?? '0', 10),
-      })
-    }
-
-    // ── 4. Build stop_id → Set of { line, headsign, direction_id } ──────────
-    //    (one stop can be served by multiple lines/directions)
-    const stopServiceMap = new Map<string, { line: string; headsign: string; direction_id: number }[]>()
-
-    if (stopTimesCsv) {
-      const stopTimes = parseCsv(stopTimesCsv)
-      for (const st of stopTimes) {
-        const info = tripInfoMap.get(st.trip_id)
-        if (!info) continue
-        if (!stopServiceMap.has(st.stop_id)) stopServiceMap.set(st.stop_id, [])
-        const existing = stopServiceMap.get(st.stop_id)!
-        if (!existing.some(e => e.line === info.line && e.direction_id === info.direction_id)) {
-          existing.push(info)
-        }
       }
+      tripInfoMap.set(t.trip_id, info)
+      tramTripIds.add(t.trip_id)
     }
 
-    // ── 5. Parse stops and upsert ALL tram-served stops ─────────────────────
+    // ── 5. Build stop → service map using lean byte parser ────────────────────
+    const stopServiceMap = stopTimesRaw
+      ? buildTramStopMap(stopTimesRaw, tramTripIds, tripInfoMap)
+      : new Map<string, { line: string; headsign: string; direction_id: number }[]>()
+
+    // ── 6. Upsert all tram-served stops ───────────────────────────────────────
     const stops = parseCsv(stopsCsv)
     const tramStops = stops.filter(s => stopServiceMap.has(s.stop_id))
 
     let upsertedCount = 0
     for (const stop of tramStops) {
       const services = stopServiceMap.get(stop.stop_id)!
-      // Insert one row per line+direction combination, or just the primary one
       const primary = services[0]
       await sql`
         INSERT INTO tram_stops_config (stop_id, stop_name, line, direction_id, headsign, active)
@@ -148,7 +192,7 @@ async function runRefresh(): Promise<NextResponse> {
       upsertedCount++
     }
 
-    // ── 6. Parse feed validity and log to gtfs_meta ──────────────────────────
+    // ── 7. Log to gtfs_meta ───────────────────────────────────────────────────
     let validFrom: string | null = null
     let validTo:   string | null = null
     let feedVersion: string | null = null
@@ -178,6 +222,7 @@ async function runRefresh(): Promise<NextResponse> {
       feed_version: feedVersion,
       valid_from: validFrom,
       valid_to: validTo,
+      gtfs_url: gtfsZipUrl,
     })
   } catch (err) {
     console.error('GTFS refresh error:', err)

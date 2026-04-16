@@ -90,7 +90,8 @@ function parsecsv_line(line: string): string[] {
 export const VBZ_CKAN_API_URL =
   'https://data.stadt-zuerich.ch/api/3/action/package_show?id=vbz_fahrplandaten_gtfs'
 
-// Filter for tram route types (GTFS route_type 0 = tram)
+// Filter for tram route types.
+// Swiss GTFS uses extended Transmodel types: 0 = tram (standard), 900 = tram (extended).
 export function isTramRoute(routeType: number): boolean {
-  return routeType === 0
+  return routeType === 0 || routeType === 900
 }
