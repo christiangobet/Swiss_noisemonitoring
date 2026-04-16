@@ -92,8 +92,8 @@ const GROUP_COLOR: Record<BandGroup, string> = {
   flange:  '#ef4444',  // red    — flanging / broadband HF
 }
 
-// Baseline window: 60 s × 4 frames/s = 240 frames (20th-percentile → ambient floor)
-const BASELINE_FRAMES = 240
+// Baseline window: 2 min × 4 frames/s = 480 frames (10th-percentile → true ambient floor)
+const BASELINE_FRAMES = 480
 
 function computeBands(freqData: Float32Array<ArrayBuffer>, sampleRate: number): number[] {
   const binHz = sampleRate / (freqData.length * 2)
@@ -109,22 +109,25 @@ function computeBands(freqData: Float32Array<ArrayBuffer>, sampleRate: number): 
 interface TramScore { score: number; rolling: number; squeal: number; flange: number }
 
 // Relative detection: compare band power against the rolling ambient baseline.
-// Each sub-score measures how much that mechanism is elevated above ambient.
-// Ratio 1.5× ≈ +2 dB → 0 %; ratio 10× ≈ +10 dB → 100 %.
-// Combined score weights squeal highest (most discriminative).
+// Each sub-score is 0–100 % where 0 dB above floor → 0 % and 10 dB above floor → 100 %.
+// Combined score weights squeal highest (most discriminative for trams).
 function computeTramScore(bands: number[], baseline: number[]): TramScore {
   if (baseline.length < BANDS.length) return { score: 0, rolling: 0, squeal: 0, flange: 0 }
 
-  const elevation = (idxs: number[]) => {
-    const cur = idxs.reduce((s, i) => s + Math.pow(10, bands[i]    / 10), 0)
-    const bas = idxs.reduce((s, i) => s + Math.pow(10, baseline[i] / 10), 0)
-    const ratio = cur / (bas + 1e-10)
-    return Math.round(Math.min(100, Math.max(0, (ratio - 1.5) / 8.5 * 100)))
+  // Elevation in dB above the ambient floor for a group of bands.
+  // Uses energy-summed power comparison so one loud bin dominates the group correctly.
+  const elevDb = (idxs: number[]) => {
+    const curLin = idxs.reduce((s, i) => s + Math.pow(10, bands[i]    / 10), 0)
+    const basLin = idxs.reduce((s, i) => s + Math.pow(10, baseline[i] / 10), 0)
+    if (basLin < 1e-30) return 0
+    const dBAbove = 10 * Math.log10(curLin / basLin)
+    // 0 dB above floor → 0 %;  10 dB above floor → 100 %
+    return Math.round(Math.min(100, Math.max(0, dBAbove * 10)))
   }
 
-  const rolling = elevation([3, 4])   // 500 Hz – 1 kHz  impact / rolling
-  const squeal  = elevation([5, 6])   // 1–5 kHz          squeal (most discriminative)
-  const flange  = elevation([7])      // >5 kHz            flanging / broadband HF
+  const rolling = elevDb([3, 4])   // 500 Hz – 1 kHz  impact / rolling
+  const squeal  = elevDb([5, 6])   // 1–5 kHz          squeal (most discriminative)
+  const flange  = elevDb([7])      // >5 kHz            flanging / broadband HF
 
   // Weighted sum; all three must contribute to avoid single-band false positives
   const score = Math.round(0.40 * squeal + 0.35 * rolling + 0.25 * flange)
@@ -383,6 +386,7 @@ export function LiveChart() {
       const src     = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 4096
+      analyser.smoothingTimeConstant = 0.3   // lower than default 0.8 so frames are distinct enough for ambient baseline
       src.connect(analyser)
       ctxRef.current      = ctx
       analyserRef.current = analyser
@@ -427,7 +431,7 @@ export function LiveChart() {
             const baseline = BANDS.map((_, bi) => {
               if (bandHistoryRef.current.length < 4) return -80
               const col = bandHistoryRef.current.map(f => f[bi]).sort((a, b) => a - b)
-              return col[Math.floor(col.length * 0.20)]
+              return col[Math.floor(col.length * 0.10)]
             })
 
             setBands(bv)
