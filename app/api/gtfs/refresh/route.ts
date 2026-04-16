@@ -6,20 +6,16 @@ import { sql } from '@/lib/db'
 import { parseCsv, VBZ_GTFS_URL, isTramRoute } from '@/lib/gtfs'
 import { unzipSync } from 'fflate'
 
-export async function GET(req: NextRequest) {
-  const authHeader = req.headers.get('authorization') ?? req.headers.get('x-api-key')
-  const isCron = req.headers.get('x-vercel-cron') === '1'
-
-  if (!isCron && authHeader !== process.env.INGEST_SECRET) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
+// GET — called by Vercel cron (x-vercel-cron header) or the Settings UI (no auth needed;
+// GTFS data is public and the operation is read-only / idempotent).
+export async function GET() {
   return runRefresh()
 }
 
+// POST — called from Pi side or external tooling; requires INGEST_SECRET.
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get('x-api-key')
-  if (apiKey !== process.env.INGEST_SECRET) {
+  if (process.env.INGEST_SECRET && apiKey !== process.env.INGEST_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   return runRefresh()

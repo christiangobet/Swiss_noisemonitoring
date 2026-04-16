@@ -139,13 +139,10 @@ export default function SettingsPage() {
   const refreshGtfs = async () => {
     setGtfsRefreshing(true)
     try {
-      const res = await fetch('/api/gtfs/refresh', {
-        method: 'POST',
-        headers: { 'x-api-key': '' }, // user provides key in Vercel env; this is a manual trigger hint
-      })
+      const res = await fetch('/api/gtfs/refresh')
       const data = await res.json()
       if (res.ok) {
-        toast({ title: 'GTFS refreshed', description: `${data.stops_updated} stops updated` })
+        toast({ title: 'GTFS refreshed', description: `${data.tram_stops_upserted} stops loaded` })
         fetchGtfsMeta()
       } else {
         toast({ title: 'GTFS refresh failed', description: data.error, variant: 'destructive' })
