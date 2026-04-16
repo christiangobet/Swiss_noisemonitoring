@@ -3,7 +3,7 @@ export const maxDuration = 300
 
 import { NextRequest, NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
-import { parseCsv, VBZ_GTFS_URL, isTramRoute } from '@/lib/gtfs'
+import { parseCsv, VBZ_CKAN_API_URL, isTramRoute } from '@/lib/gtfs'
 import { unzipSync } from 'fflate'
 
 // GET — called by Vercel cron (x-vercel-cron header) or the Settings UI (no auth needed;
@@ -23,13 +23,42 @@ export async function POST(req: NextRequest) {
 
 async function runRefresh(): Promise<NextResponse> {
   try {
-    // ── 1. Fetch and unzip the VBZ GTFS feed ────────────────────────────────
-    const response = await fetch(VBZ_GTFS_URL, {
+    // ── 1. Discover the current GTFS ZIP URL via the CKAN API ────────────────
+    const ckanRes = await fetch(VBZ_CKAN_API_URL, {
+      headers: { 'User-Agent': 'TramWatch/1.0' },
+    })
+    if (!ckanRes.ok) {
+      return NextResponse.json(
+        { error: `CKAN API error: ${ckanRes.status} ${ckanRes.statusText}` },
+        { status: 502 }
+      )
+    }
+    const ckanData = await ckanRes.json() as {
+      success: boolean
+      result: { resources: Array<{ url: string; format: string; name: string }> }
+    }
+    if (!ckanData.success || !ckanData.result?.resources?.length) {
+      return NextResponse.json({ error: 'CKAN API returned no resources' }, { status: 502 })
+    }
+    // Pick the first ZIP resource (there is typically exactly one)
+    const zipResource = ckanData.result.resources.find(
+      r => r.url.toLowerCase().endsWith('.zip') || r.format.toUpperCase() === 'ZIP'
+    )
+    if (!zipResource) {
+      return NextResponse.json(
+        { error: 'No ZIP resource found in CKAN package', resources: ckanData.result.resources.map(r => r.url) },
+        { status: 422 }
+      )
+    }
+    const gtfsZipUrl = zipResource.url
+
+    // ── 2. Fetch and unzip the VBZ GTFS feed ────────────────────────────────
+    const response = await fetch(gtfsZipUrl, {
       headers: { 'User-Agent': 'TramWatch/1.0' },
     })
     if (!response.ok) {
       return NextResponse.json(
-        { error: `Failed to fetch GTFS ZIP: ${response.status} ${response.statusText}` },
+        { error: `Failed to fetch GTFS ZIP: ${response.status} ${response.statusText}`, url: gtfsZipUrl },
         { status: 502 }
       )
     }

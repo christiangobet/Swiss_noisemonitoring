@@ -86,9 +86,9 @@ function parsecsv_line(line: string): string[] {
   return result
 }
 
-// VBZ GTFS static feed URL (Zürich open data portal)
-export const VBZ_GTFS_URL =
-  'https://data.stadt-zuerich.ch/dataset/vbz_fahrplandaten_gtfs/download/OGDS-VBZ-GTFS.zip'
+// CKAN API endpoint to discover the current VBZ GTFS ZIP URL dynamically
+export const VBZ_CKAN_API_URL =
+  'https://data.stadt-zuerich.ch/api/3/action/package_show?id=vbz_fahrplandaten_gtfs'
 
 // Filter for tram route types (GTFS route_type 0 = tram)
 export function isTramRoute(routeType: number): boolean {
