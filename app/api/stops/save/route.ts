@@ -8,6 +8,7 @@ interface StopData {
   stop_name: string
   line: string
   headsign: string | null
+  monitored_lines?: string | null
 }
 
 interface SaveBody {
@@ -43,6 +44,9 @@ export async function POST(req: NextRequest) {
         active       BOOLEAN DEFAULT TRUE
       )
     `
+    try {
+      await sql`ALTER TABLE tram_stops_config ADD COLUMN IF NOT EXISTS monitored_lines TEXT`
+    } catch { /* column may already exist on older Postgres versions */ }
 
     // Deactivate all existing active stops
     await sql`UPDATE tram_stops_config SET active = FALSE`
@@ -55,19 +59,21 @@ export async function POST(req: NextRequest) {
         if (data) {
           // Upsert — handles both transport.opendata.ch IDs (new) and GTFS IDs (legacy)
           await sql`
-            INSERT INTO tram_stops_config (stop_id, stop_name, line, headsign, active)
+            INSERT INTO tram_stops_config (stop_id, stop_name, line, headsign, monitored_lines, active)
             VALUES (
               ${data.stop_id},
               ${data.stop_name},
               ${data.line || ''},
               ${data.headsign ?? null},
+              ${data.monitored_lines ?? null},
               TRUE
             )
             ON CONFLICT (stop_id) DO UPDATE SET
-              stop_name = EXCLUDED.stop_name,
-              line      = EXCLUDED.line,
-              headsign  = EXCLUDED.headsign,
-              active    = TRUE
+              stop_name      = EXCLUDED.stop_name,
+              line           = EXCLUDED.line,
+              headsign       = EXCLUDED.headsign,
+              monitored_lines = EXCLUDED.monitored_lines,
+              active         = TRUE
           `
         } else {
           // Fallback: ID already in DB (from GTFS or prior save), just activate it

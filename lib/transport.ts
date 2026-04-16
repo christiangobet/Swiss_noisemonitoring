@@ -19,6 +19,7 @@ export interface TramDeparture {
   stop_name: string
   line: string
   direction: string
+  category: string
   /** Scheduled departure — ISO 8601 with offset, e.g. 2026-04-16T14:35:00+0200 */
   scheduled: string
   /** Predicted departure (from prognosis); falls back to scheduled */
@@ -94,6 +95,7 @@ export async function getStationboardTrams(stopId: string, limit = 20, tramOnly 
         stop_name: stopName,
         line:      lineFromName || d.number || '',
         direction: d.to ?? '',
+        category:  String(d.category ?? '').trim().toLowerCase(),
         scheduled: sched,
         expected:  prog || sched,
       }

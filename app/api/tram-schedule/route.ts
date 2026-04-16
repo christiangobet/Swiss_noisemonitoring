@@ -2,14 +2,14 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
-import { getUpcomingTrams, getStationboardTrams } from '@/lib/transport'
+import { getStationboardTrams } from '@/lib/transport'
 
 export async function GET(req: NextRequest) {
   const debug = req.nextUrl.searchParams.has('debug')
 
   try {
     const activeStops = await sql`
-      SELECT stop_id, stop_name
+      SELECT stop_id, monitored_lines
       FROM tram_stops_config
       WHERE active = TRUE
     `
@@ -19,7 +19,23 @@ export async function GET(req: NextRequest) {
     }
 
     const stopIds = activeStops.map(s => String(s.stop_id))
-    const departures = await getUpcomingTrams(stopIds)
+
+    const perStop = await Promise.all(
+      activeStops.map(async stop => {
+        const stopId = String(stop.stop_id)
+        const allDeps = await getStationboardTrams(stopId, 20, false)
+        const monitoredLines = stop.monitored_lines ? String(stop.monitored_lines) : null
+        if (monitoredLines && monitoredLines.trim().length > 0) {
+          const allowed = new Set(monitoredLines.split(',').map((l: string) => l.trim()).filter(Boolean))
+          return allDeps.filter(d => allowed.has(d.line))
+        }
+        return allDeps
+      })
+    )
+
+    const departures = perStop.flat().sort(
+      (a, b) => new Date(a.expected).getTime() - new Date(b.expected).getTime()
+    )
 
     if (debug) {
       // Raw stationboard per stop for diagnostics

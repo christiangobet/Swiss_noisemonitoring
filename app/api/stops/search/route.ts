@@ -19,13 +19,28 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ results: [], count: 0, query: q })
     }
 
-    // 2. For each station (≤6) call stationboard in parallel to discover tram lines
+    // 2. For each station (≤6) call stationboard in parallel to discover lines
     const enriched = await Promise.all(
       stations.slice(0, 6).map(async station => {
-        const trams = await getStationboardTrams(station.id, 12)
+        const trams = await getStationboardTrams(station.id, 20, false)
         const lines      = Array.from(new Set(trams.map(t => t.line).filter(Boolean)))
         const directions = Array.from(new Set(trams.map(t => t.direction).filter(Boolean)))
-        return { ...station, lines, directions, is_tram_stop: trams.length > 0 }
+        // Build lines_detail: group by line, capture category and up to 3 unique directions
+        const lineMap = new Map<string, { category: string; directions: Set<string> }>()
+        for (const t of trams) {
+          if (!t.line) continue
+          if (!lineMap.has(t.line)) {
+            lineMap.set(t.line, { category: t.category, directions: new Set() })
+          }
+          const entry = lineMap.get(t.line)!
+          if (entry.directions.size < 3) entry.directions.add(t.direction)
+        }
+        const lines_detail = Array.from(lineMap.entries()).map(([line, { category, directions }]) => ({
+          line,
+          category,
+          directions: Array.from(directions),
+        }))
+        return { ...station, lines, directions, lines_detail, is_tram_stop: trams.length > 0 }
       })
     )
 
@@ -56,6 +71,7 @@ export async function GET(req: NextRequest) {
           stop_id:      s.id,
           stop_name:    s.name,
           line:         s.lines.join(', '),
+          lines_detail: s.lines_detail,
           direction_id: null as null,
           // headsign = summary of where trams go from this platform
           headsign:     s.directions.slice(0, 3).join(' / ') || null,

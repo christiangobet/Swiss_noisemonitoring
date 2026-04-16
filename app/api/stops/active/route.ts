@@ -6,7 +6,7 @@ import { sql } from '@/lib/db'
 export async function GET() {
   try {
     const rows = await sql`
-      SELECT stop_id, stop_name, line, direction_id, headsign, platform, active
+      SELECT stop_id, stop_name, line, direction_id, headsign, platform, active, monitored_lines
       FROM tram_stops_config
       WHERE active = TRUE
       ORDER BY stop_name, line, direction_id
@@ -26,13 +26,14 @@ export async function GET() {
         stop_name,
         line: platforms[0].line as string,
         platforms: platforms.map(p => ({
-          stop_id:      p.stop_id,
-          stop_name:    p.stop_name,
-          line:         p.line,
-          direction_id: p.direction_id,
-          headsign:     p.headsign,
-          platform:     p.platform,
-          active:       p.active,
+          stop_id:        p.stop_id,
+          stop_name:      p.stop_name,
+          line:           p.line,
+          direction_id:   p.direction_id,
+          headsign:       p.headsign,
+          platform:       p.platform,
+          active:         p.active,
+          monitored_lines: p.monitored_lines ?? null,
         })),
       }
     })

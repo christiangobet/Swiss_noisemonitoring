@@ -13,14 +13,22 @@ import { Search, RefreshCw, CheckCircle2, AlertCircle, Save, MapPin, ChevronDown
 import { toast } from '@/hooks/use-toast'
 import { BrowserMicCard } from '@/components/settings/browser-mic'
 
+interface LineDetail {
+  line: string
+  category: string   // 't', 'b', etc.
+  directions: string[]
+}
+
 interface Platform {
   stop_id: string
   stop_name: string
   line: string
+  lines_detail?: LineDetail[]
   direction_id: number | null
   headsign: string | null
   platform: string | null
   active: boolean
+  monitored_lines?: string | null
 }
 
 interface StopResult {
@@ -55,6 +63,7 @@ export default function SettingsPage() {
   const [searched, setSearched] = useState(false)
   const [searching, setSearching] = useState(false)
   const [selectedStops, setSelectedStops] = useState<Set<string>>(new Set())
+  const [lineSelections, setLineSelections] = useState<Map<string, Set<string>>>(new Map())
   const [savingStops, setSavingStops] = useState(false)
 
   // ── GTFS / sensors ──────────────────────────────────────────────────────────
@@ -80,6 +89,19 @@ export default function SettingsPage() {
         (data.stops as StopResult[]).flatMap(g => g.platforms.map(p => p.stop_id))
       )
       setSelectedStops(activePlatformIds)
+      // Populate lineSelections from monitored_lines
+      const newLineSelections = new Map<string, Set<string>>()
+      for (const group of (data.stops as StopResult[])) {
+        for (const p of group.platforms) {
+          if (p.monitored_lines && p.monitored_lines.trim().length > 0) {
+            const lines = p.monitored_lines.split(',').map((l: string) => l.trim()).filter(Boolean)
+            if (lines.length > 0) {
+              newLineSelections.set(p.stop_id, new Set(lines))
+            }
+          }
+        }
+      }
+      setLineSelections(newLineSelections)
     } catch { /* ignore */ }
   }, [])
 
@@ -127,11 +149,23 @@ export default function SettingsPage() {
       } else {
         const results = data.results as StopResult[]
         setSearchResults(results)
-        // Auto-select all platforms from the results so user can just hit Save
-        const allIds = new Set<string>(results.flatMap(g => g.platforms.map(p => p.stop_id)))
-        setSelectedStops(allIds)
+        // Auto-populate lineSelections with tram lines (category starts with 't')
+        const newLineSelections = new Map<string, Set<string>>()
+        for (const group of results) {
+          for (const p of group.platforms) {
+            const tramLines = (p.lines_detail ?? [])
+              .filter(ld => ld.category.toLowerCase().startsWith('t'))
+              .map(ld => ld.line)
+            if (tramLines.length > 0) {
+              newLineSelections.set(p.stop_id, new Set(tramLines))
+            }
+          }
+        }
+        setLineSelections(newLineSelections)
+        // selectedStops = all stop_ids that appear in lineSelections
+        setSelectedStops(new Set(newLineSelections.keys()))
       }
-    } catch (e) {
+    } catch {
       setSearchError('Network error — could not reach search API')
       setSearchResults([])
     } finally {
@@ -140,11 +174,23 @@ export default function SettingsPage() {
     }
   }
 
-  const toggleStop = (stopId: string) => {
-    setSelectedStops(prev => {
-      const next = new Set(prev)
-      if (next.has(stopId)) next.delete(stopId)
-      else next.add(stopId)
+  // ── Toggle line selection ─────────────────────────────────────────────────
+  const toggleLine = (stopId: string, line: string) => {
+    setLineSelections(prev => {
+      const next = new Map(prev)
+      const lines = new Set(next.get(stopId) ?? [])
+      if (lines.has(line)) {
+        lines.delete(line)
+      } else {
+        lines.add(line)
+      }
+      if (lines.size === 0) {
+        next.delete(stopId)
+      } else {
+        next.set(stopId, lines)
+      }
+      // Keep selectedStops in sync
+      setSelectedStops(new Set(next.keys()))
       return next
     })
   }
@@ -153,27 +199,29 @@ export default function SettingsPage() {
   const saveStops = async () => {
     setSavingStops(true)
     try {
-      // Collect full platform data so the save route can upsert new stops
-      // (transport.opendata.ch IDs won't be in the DB yet)
+      // Only save stop_ids that have at least one line selected
+      const stops = Array.from(lineSelections.keys())
       const allPlatforms = displayResults.flatMap(g => g.platforms)
-      const stopData = allPlatforms.filter(p => selectedStops.has(p.stop_id))
+      const stopData = allPlatforms.filter(p => lineSelections.has(p.stop_id))
 
       const res = await fetch('/api/stops/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          stops: Array.from(selectedStops),
+          stops,
           stop_data: stopData.map(p => ({
-            stop_id:   p.stop_id,
-            stop_name: p.stop_name,
-            line:      p.line,
-            headsign:  p.headsign,
+            stop_id:        p.stop_id,
+            stop_name:      p.stop_name,
+            line:           p.line,
+            headsign:       p.headsign,
+            monitored_lines: Array.from(lineSelections.get(p.stop_id) ?? []).sort().join(',') || null,
           })),
         }),
       })
       const data = await res.json()
       if (res.ok) {
-        toast({ title: 'Platforms saved', description: `${selectedStops.size} platform(s) active` })
+        const totalLines = Array.from(lineSelections.values()).reduce((n, s) => n + s.size, 0)
+        toast({ title: 'Configuration saved', description: `${totalLines} line(s) across ${stops.length} stop(s) active` })
         await fetchActiveStops()
         setSearchResults([])
         setConfiguring(false)
@@ -224,6 +272,10 @@ export default function SettingsPage() {
 
   const displayResults = searchResults.length > 0 ? searchResults : []
 
+  // Count total lines across all lineSelections entries
+  const totalLinesSelected = Array.from(lineSelections.values()).reduce((n, s) => n + s.size, 0)
+  const totalStopsSelected = lineSelections.size
+
   return (
     <div className="p-4 space-y-4">
       <h1 className="text-lg font-semibold text-foreground">Settings</h1>
@@ -269,17 +321,19 @@ export default function SettingsPage() {
             <div className="space-y-2">
               {activeGroups.map(group => (
                 <div key={`${group.stop_name}-${group.line}`}>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-sm font-medium text-foreground">{group.stop_name}</span>
-                    <Badge variant="outline" className="text-xs">Line {group.line}</Badge>
-                  </div>
-                  <div className="space-y-1 pl-3">
-                    {group.platforms.map(p => (
-                      <p key={p.stop_id} className="text-xs text-muted-foreground">
-                        → {p.headsign ?? 'Unknown direction'}
-                        {p.platform && <span className="ml-1 opacity-60">({p.platform})</span>}
-                      </p>
-                    ))}
+                  <p className="text-sm font-medium text-foreground">{group.stop_name}</p>
+                  <div className="space-y-1 pl-3 mt-1">
+                    {group.platforms.map(p => {
+                      const ml = p.monitored_lines?.trim()
+                      const lineList = ml
+                        ? ml.split(',').map(l => l.trim()).filter(Boolean).join(', ')
+                        : p.line || 'all lines'
+                      return (
+                        <p key={p.stop_id} className="text-xs text-muted-foreground">
+                          Monitoring: Lines {lineList}
+                        </p>
+                      )
+                    })}
                   </div>
                 </div>
               ))}
@@ -290,12 +344,12 @@ export default function SettingsPage() {
         {!configuring && !monitoredStop && (
           <CardContent className="pt-0">
             <p className="text-sm text-muted-foreground">
-              Click <strong>Configure</strong> to search for your tram stop and select platforms to monitor.
+              Click <strong>Configure</strong> to search for your tram stop and select lines to monitor.
             </p>
           </CardContent>
         )}
 
-        {/* Search + platform selection */}
+        {/* Search + line selection */}
         {configuring && (
           <CardContent className="pt-0 space-y-4 border-t">
             <div className="flex gap-2 pt-3">
@@ -315,36 +369,76 @@ export default function SettingsPage() {
             </div>
 
             {displayResults.length > 0 && (
-              <div className="space-y-3">
-                {displayResults.map(group => (
-                  <div key={`${group.stop_name}-${group.line}`} className="space-y-2">
-                    <div className="flex items-center gap-2">
+              <div className="space-y-4">
+                {displayResults.map(group => {
+                  // Collect all lines_detail across platforms for this stop name
+                  // Group by category: trams first, buses, other
+                  const platformsWithDetail = group.platforms.filter(p => p.lines_detail && p.lines_detail.length > 0)
+
+                  return (
+                    <div key={`${group.stop_name}-${group.line}`} className="space-y-2">
                       <span className="text-sm font-medium text-foreground">{group.stop_name}</span>
-                      <Badge variant="outline">Line {group.line}</Badge>
+
+                      {platformsWithDetail.map(p => {
+                        const trams = (p.lines_detail ?? []).filter(ld => ld.category.toLowerCase().startsWith('t'))
+                        const buses = (p.lines_detail ?? []).filter(ld => ld.category.toLowerCase().startsWith('b'))
+                        const other = (p.lines_detail ?? []).filter(ld =>
+                          !ld.category.toLowerCase().startsWith('t') &&
+                          !ld.category.toLowerCase().startsWith('b')
+                        )
+
+                        const categoryGroups: Array<{ label: string; lines: LineDetail[] }> = []
+                        if (trams.length > 0) categoryGroups.push({ label: 'Trams', lines: trams })
+                        if (buses.length > 0) categoryGroups.push({ label: 'Buses', lines: buses })
+                        if (other.length > 0) categoryGroups.push({ label: 'Other', lines: other })
+
+                        if (categoryGroups.length === 0) return null
+
+                        return (
+                          <div key={p.stop_id} className="pl-3 space-y-2">
+                            {categoryGroups.map(({ label, lines }) => (
+                              <div key={label}>
+                                <p className="text-xs text-muted-foreground mb-1">{label}</p>
+                                <div className="space-y-1 pl-2">
+                                  {lines.map(ld => {
+                                    const checked = lineSelections.get(p.stop_id)?.has(ld.line) ?? false
+                                    return (
+                                      <div key={ld.line} className="flex items-center gap-3">
+                                        <Checkbox
+                                          id={`${p.stop_id}-${ld.line}`}
+                                          checked={checked}
+                                          onCheckedChange={() => toggleLine(p.stop_id, ld.line)}
+                                        />
+                                        <label
+                                          htmlFor={`${p.stop_id}-${ld.line}`}
+                                          className="text-sm cursor-pointer flex items-center gap-2"
+                                        >
+                                          <Badge variant="outline" className="text-xs font-mono px-1.5 py-0">
+                                            {ld.line}
+                                          </Badge>
+                                          <span className="text-muted-foreground text-xs">
+                                            {ld.directions.slice(0, 3).join(' / ')}
+                                          </span>
+                                        </label>
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )
+                      })}
                     </div>
-                    {group.platforms.map(p => (
-                      <div key={p.stop_id} className="flex items-center gap-3 pl-4">
-                        <Checkbox
-                          id={p.stop_id}
-                          checked={selectedStops.has(p.stop_id)}
-                          onCheckedChange={() => toggleStop(p.stop_id)}
-                        />
-                        <label htmlFor={p.stop_id} className="text-sm cursor-pointer flex-1">
-                          <span className="text-foreground">{p.headsign ?? 'Direction unknown'}</span>
-                          {p.platform && <span className="ml-2 text-xs text-muted-foreground">({p.platform})</span>}
-                          <span className="ml-2 font-mono text-xs opacity-40">{p.stop_id}</span>
-                        </label>
-                      </div>
-                    ))}
-                  </div>
-                ))}
+                  )
+                })}
 
                 <p className="text-xs text-muted-foreground">
-                  {selectedStops.size} platform{selectedStops.size !== 1 ? 's' : ''} selected
+                  {totalLinesSelected} line{totalLinesSelected !== 1 ? 's' : ''} selected across {totalStopsSelected} stop{totalStopsSelected !== 1 ? 's' : ''}
                 </p>
                 <Button
                   onClick={saveStops}
-                  disabled={savingStops || selectedStops.size === 0}
+                  disabled={savingStops || totalLinesSelected === 0}
                   size="sm"
                 >
                   <Save className="h-4 w-4 mr-2" />
