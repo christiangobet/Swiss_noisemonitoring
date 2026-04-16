@@ -23,8 +23,8 @@ export async function GET(req: NextRequest) {
     const enriched = await Promise.all(
       stations.slice(0, 6).map(async station => {
         const trams = await getStationboardTrams(station.id, 12)
-        const lines      = [...new Set(trams.map(t => t.line).filter(Boolean))]
-        const directions = [...new Set(trams.map(t => t.direction).filter(Boolean))]
+        const lines      = Array.from(new Set(trams.map(t => t.line).filter(Boolean)))
+        const directions = Array.from(new Set(trams.map(t => t.direction).filter(Boolean)))
         return { ...station, lines, directions, is_tram_stop: trams.length > 0 }
       })
     )
@@ -45,7 +45,7 @@ export async function GET(req: NextRequest) {
     }
 
     const results = Array.from(grouped.entries()).map(([stop_name, stops]) => {
-      const allLines = [...new Set(stops.flatMap(s => s.lines))].join(', ')
+      const allLines = Array.from(new Set(stops.flatMap(s => s.lines))).join(', ')
       return {
         stop_name,
         line: allLines || '?',

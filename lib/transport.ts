@@ -45,7 +45,7 @@ interface OdchStationboardResult {
 
 /** Search for stations matching a query string. */
 export async function searchStations(q: string): Promise<Array<{ id: string; name: string }>> {
-  const url = `${BASE}/locations?query=${encodeURIComponent(q)}&type=station&limit=10`
+  const url = `${BASE}/locations?query=${encodeURIComponent(q)}&limit=10`
   const res = await fetch(url, { headers: UA })
   if (!res.ok) throw new Error(`Locations API ${res.status}`)
   const data: OdchLocationResult = await res.json()
