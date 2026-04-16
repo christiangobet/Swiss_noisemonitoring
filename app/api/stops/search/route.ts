@@ -29,13 +29,16 @@ export async function GET(req: NextRequest) {
       })
     )
 
-    // 3. Check which of these IDs are already active in the DB
+    // 3. Check which of these IDs are already active in the DB (non-fatal if table missing)
     const allIds = enriched.map(s => s.id)
-    const activeRows = await sql`
-      SELECT stop_id FROM tram_stops_config
-      WHERE stop_id = ANY(${allIds}) AND active = TRUE
-    `
-    const activeIds = new Set(activeRows.map(r => String(r.stop_id)))
+    let activeIds = new Set<string>()
+    try {
+      const activeRows = await sql`
+        SELECT stop_id FROM tram_stops_config
+        WHERE stop_id = ANY(${allIds}) AND active = TRUE
+      `
+      activeIds = new Set(activeRows.map(r => String(r.stop_id)))
+    } catch { /* table may not exist yet — proceed without active status */ }
 
     // 4. Group by stop_name (multiple IDs can share a name = different sides of road)
     const grouped = new Map<string, typeof enriched>()

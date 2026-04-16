@@ -50,6 +50,8 @@ export default function SettingsPage() {
   const [configuring, setConfiguring] = useState(false)
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<StopResult[]>([])
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [searched, setSearched] = useState(false)
   const [searching, setSearching] = useState(false)
   const [selectedStops, setSelectedStops] = useState<Set<string>>(new Set())
   const [savingStops, setSavingStops] = useState(false)
@@ -113,25 +115,27 @@ export default function SettingsPage() {
   const handleSearch = async () => {
     if (query.trim().length < 2) return
     setSearching(true)
+    setSearchError(null)
+    setSearched(false)
     try {
       const res = await fetch(`/api/stops/search?q=${encodeURIComponent(query)}`)
-      if (res.ok) {
-        const data = await res.json()
+      const data = await res.json()
+      if (!res.ok) {
+        setSearchError(data.error ?? `Search failed (${res.status})`)
+        setSearchResults([])
+      } else {
         const results = data.results as StopResult[]
         setSearchResults(results)
-        // Pre-select platforms that are already active
-        const activePlatformIds = new Set<string>(
-          activeGroups.flatMap(g => g.platforms.map(p => p.stop_id))
-        )
-        // Also pre-select all platforms from the first matching stop for convenience
-        const allFromResults = new Set<string>(activePlatformIds)
-        results.forEach(g => g.platforms.forEach(p => {
-          if (activePlatformIds.has(p.stop_id)) allFromResults.add(p.stop_id)
-        }))
-        setSelectedStops(allFromResults)
+        // Auto-select all platforms from the results so user can just hit Save
+        const allIds = new Set<string>(results.flatMap(g => g.platforms.map(p => p.stop_id)))
+        setSelectedStops(allIds)
       }
-    } catch { /* ignore */ } finally {
+    } catch (e) {
+      setSearchError('Network error — could not reach search API')
+      setSearchResults([])
+    } finally {
       setSearching(false)
+      setSearched(true)
     }
   }
 
@@ -240,7 +244,11 @@ export default function SettingsPage() {
               variant="ghost"
               onClick={() => {
                 setConfiguring(v => !v)
-                if (!configuring) setSearchResults([])
+                if (!configuring) {
+                  setSearchResults([])
+                  setSearchError(null)
+                  setSearched(false)
+                }
               }}
             >
               {configuring ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
@@ -339,9 +347,17 @@ export default function SettingsPage() {
               </div>
             )}
 
-            {displayResults.length === 0 && query.length < 2 && (
+            {searchError && (
+              <p className="text-xs text-destructive">{searchError}</p>
+            )}
+            {!searchError && searched && displayResults.length === 0 && (
               <p className="text-xs text-muted-foreground">
-                Type at least 2 characters and press Enter or click Search.
+                No stops found for &ldquo;{query}&rdquo;. Try a shorter name.
+              </p>
+            )}
+            {!searched && !searchError && (
+              <p className="text-xs text-muted-foreground">
+                Type a stop name and press Enter or Search.
               </p>
             )}
           </CardContent>
