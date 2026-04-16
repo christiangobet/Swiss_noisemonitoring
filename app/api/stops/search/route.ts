@@ -12,34 +12,33 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // Search saved stops first
-    const saved = await sql`
-      SELECT id, stop_id, stop_name, line, direction_id, headsign, platform, active
+    // Search all tram stops loaded from GTFS (active or not)
+    const rows = await sql`
+      SELECT stop_id, stop_name, line, direction_id, headsign, platform, active
       FROM tram_stops_config
       WHERE stop_name ILIKE ${'%' + q + '%'}
-      ORDER BY stop_name
-      LIMIT 50
+      ORDER BY stop_name, line, direction_id
+      LIMIT 100
     `
 
-    // Group by physical platform (stop_name + line combination)
-    const grouped: Record<string, typeof saved> = {}
-    for (const stop of saved) {
-      const key = `${stop.stop_name as string}__${stop.line as string}`
-      if (!grouped[key]) grouped[key] = []
-      grouped[key].push(stop)
+    // Group by stop_name so the UI can show platforms together
+    const grouped = new Map<string, typeof rows>()
+    for (const row of rows) {
+      const key = row.stop_name as string
+      if (!grouped.has(key)) grouped.set(key, [])
+      grouped.get(key)!.push(row)
     }
 
-    const results = Object.entries(grouped).map(([, stops]) => ({
-      stop_name: stops[0].stop_name,
-      line: stops[0].line,
-      platforms: stops.map(s => ({
-        stop_id: s.stop_id,
-        stop_name: s.stop_name,
-        line: s.line,
-        direction_id: s.direction_id,
-        headsign: s.headsign,
-        platform: s.platform,
-        active: s.active,
+    const results = Array.from(grouped.entries()).map(([stop_name, platforms]) => ({
+      stop_name,
+      platforms: platforms.map(p => ({
+        stop_id:     p.stop_id,
+        stop_name:   p.stop_name,
+        line:        p.line,
+        direction_id: p.direction_id,
+        headsign:    p.headsign,
+        platform:    p.platform,
+        active:      p.active,
       })),
     }))
 

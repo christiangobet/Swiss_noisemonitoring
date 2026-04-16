@@ -4,15 +4,9 @@ export const maxDuration = 300
 import { NextRequest, NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
 import { parseCsv, VBZ_GTFS_URL, isTramRoute } from '@/lib/gtfs'
-
-// JSZip-free approach: use built-in DecompressionStream or fetch individual files.
-// We use the unzip-stream approach via a streaming fetch + manual ZIP parsing.
-// For Vercel edge/serverless, we use the fflate library (bundled with Next.js).
-// Since we can't import fflate directly without adding it as a dep, we use
-// the native approach: fetch the ZIP and parse it server-side with Node.js zlib.
+import { unzipSync } from 'fflate'
 
 export async function GET(req: NextRequest) {
-  // Allow Vercel cron (no auth) or manual call with INGEST_SECRET
   const authHeader = req.headers.get('authorization') ?? req.headers.get('x-api-key')
   const isCron = req.headers.get('x-vercel-cron') === '1'
 
@@ -33,11 +27,10 @@ export async function POST(req: NextRequest) {
 
 async function runRefresh(): Promise<NextResponse> {
   try {
-    // Fetch the ZIP
+    // ── 1. Fetch and unzip the VBZ GTFS feed ────────────────────────────────
     const response = await fetch(VBZ_GTFS_URL, {
       headers: { 'User-Agent': 'TramWatch/1.0' },
     })
-
     if (!response.ok) {
       return NextResponse.json(
         { error: `Failed to fetch GTFS ZIP: ${response.status} ${response.statusText}` },
@@ -45,23 +38,18 @@ async function runRefresh(): Promise<NextResponse> {
       )
     }
 
-    const arrayBuffer = await response.arrayBuffer()
-    const zipBuffer = Buffer.from(arrayBuffer)
-
-    // Parse ZIP using fflate (bundled via next.js webpack)
-    // We use a dynamic import to avoid SSR issues
-    const { unzipSync } = await import('fflate')
-    const files = unzipSync(new Uint8Array(zipBuffer))
+    const zipBuffer = new Uint8Array(await response.arrayBuffer())
+    const files = unzipSync(zipBuffer)
 
     const getFile = (name: string): string | null => {
       const entry = files[name]
-      if (!entry) return null
-      return new TextDecoder('utf-8').decode(entry)
+      return entry ? new TextDecoder('utf-8').decode(entry) : null
     }
 
-    const routesCsv = getFile('routes.txt')
-    const stopsCsv = getFile('stops.txt')
-    const tripsCsv = getFile('trips.txt')
+    const routesCsv   = getFile('routes.txt')
+    const stopsCsv    = getFile('stops.txt')
+    const tripsCsv    = getFile('trips.txt')
+    const stopTimesCsv = getFile('stop_times.txt')
     const calendarCsv = getFile('calendar.txt')
     const feedInfoCsv = getFile('feed_info.txt')
 
@@ -69,88 +57,88 @@ async function runRefresh(): Promise<NextResponse> {
       return NextResponse.json({ error: 'Required GTFS files not found in ZIP' }, { status: 422 })
     }
 
-    // Parse routes — tram only (route_type = 0)
+    // ── 2. Parse tram routes (route_type = 0) ───────────────────────────────
     const routes = parseCsv(routesCsv)
-    const tramRouteIds = new Set(
-      routes
-        .filter(r => isTramRoute(parseInt(r.route_type ?? '999', 10)))
-        .map(r => r.route_id)
-    )
+    const tramRouteMap = new Map<string, string>() // route_id → route_short_name
+    for (const r of routes) {
+      if (isTramRoute(parseInt(r.route_type ?? '999', 10))) {
+        tramRouteMap.set(r.route_id, r.route_short_name ?? '')
+      }
+    }
 
-    // Parse trips for tram routes
+    // ── 3. Build trip_id → { line, headsign, direction_id } ─────────────────
     const trips = parseCsv(tripsCsv)
-    const tramTrips = trips.filter(t => tramRouteIds.has(t.route_id))
-
-    // Build stop → route/headsign/direction mapping
-    const stopTimesCsv = getFile('stop_times.txt')
-    const stopTripMap: Map<string, { route_id: string; headsign: string; direction_id: number; route_short_name: string }[]> = new Map()
-
-    // Build trip_id → route info
-    const tripRouteMap = new Map<string, { route_id: string; headsign: string; direction_id: number; route_short_name: string }>()
-    for (const trip of tramTrips) {
-      const route = routes.find(r => r.route_id === trip.route_id)
-      tripRouteMap.set(trip.trip_id, {
-        route_id: trip.route_id,
-        headsign: trip.trip_headsign ?? '',
-        direction_id: parseInt(trip.direction_id ?? '0', 10),
-        route_short_name: route?.route_short_name ?? '',
+    const tripInfoMap = new Map<string, { line: string; headsign: string; direction_id: number }>()
+    for (const t of trips) {
+      if (!tramRouteMap.has(t.route_id)) continue
+      tripInfoMap.set(t.trip_id, {
+        line: tramRouteMap.get(t.route_id)!,
+        headsign: t.trip_headsign ?? '',
+        direction_id: parseInt(t.direction_id ?? '0', 10),
       })
     }
+
+    // ── 4. Build stop_id → Set of { line, headsign, direction_id } ──────────
+    //    (one stop can be served by multiple lines/directions)
+    const stopServiceMap = new Map<string, { line: string; headsign: string; direction_id: number }[]>()
 
     if (stopTimesCsv) {
       const stopTimes = parseCsv(stopTimesCsv)
       for (const st of stopTimes) {
-        const tripInfo = tripRouteMap.get(st.trip_id)
-        if (!tripInfo) continue
-        if (!stopTripMap.has(st.stop_id)) stopTripMap.set(st.stop_id, [])
-        const existing = stopTripMap.get(st.stop_id)!
-        if (!existing.some(e => e.route_id === tripInfo.route_id && e.direction_id === tripInfo.direction_id)) {
-          existing.push(tripInfo)
+        const info = tripInfoMap.get(st.trip_id)
+        if (!info) continue
+        if (!stopServiceMap.has(st.stop_id)) stopServiceMap.set(st.stop_id, [])
+        const existing = stopServiceMap.get(st.stop_id)!
+        if (!existing.some(e => e.line === info.line && e.direction_id === info.direction_id)) {
+          existing.push(info)
         }
       }
     }
 
-    // Parse stops
+    // ── 5. Parse stops and upsert ALL tram-served stops ─────────────────────
     const stops = parseCsv(stopsCsv)
+    const tramStops = stops.filter(s => stopServiceMap.has(s.stop_id))
 
-    // Find active stop_ids in our config and update their metadata
-    const activeStops = await sql`SELECT stop_id FROM tram_stops_config`
-    const activeStopIds = new Set(activeStops.map(s => s.stop_id as string))
-
-    let updatedCount = 0
-    for (const stop of stops) {
-      if (!activeStopIds.has(stop.stop_id)) continue
-      const tripInfos = stopTripMap.get(stop.stop_id) ?? []
-      const primary = tripInfos[0]
-
+    let upsertedCount = 0
+    for (const stop of tramStops) {
+      const services = stopServiceMap.get(stop.stop_id)!
+      // Insert one row per line+direction combination, or just the primary one
+      const primary = services[0]
       await sql`
-        UPDATE tram_stops_config
-        SET
-          stop_name = ${stop.stop_name},
-          line = ${primary?.route_short_name ?? 'unknown'},
-          direction_id = ${primary?.direction_id ?? null},
-          headsign = ${primary?.headsign ?? null}
-        WHERE stop_id = ${stop.stop_id}
+        INSERT INTO tram_stops_config (stop_id, stop_name, line, direction_id, headsign, active)
+        VALUES (
+          ${stop.stop_id},
+          ${stop.stop_name},
+          ${primary.line},
+          ${primary.direction_id},
+          ${primary.headsign},
+          FALSE
+        )
+        ON CONFLICT (stop_id) DO UPDATE SET
+          stop_name    = EXCLUDED.stop_name,
+          line         = EXCLUDED.line,
+          direction_id = EXCLUDED.direction_id,
+          headsign     = EXCLUDED.headsign
       `
-      updatedCount++
+      upsertedCount++
     }
 
-    // Parse calendar for validity window
+    // ── 6. Parse feed validity and log to gtfs_meta ──────────────────────────
     let validFrom: string | null = null
-    let validTo: string | null = null
+    let validTo:   string | null = null
     let feedVersion: string | null = null
 
     if (calendarCsv) {
       const calendar = parseCsv(calendarCsv)
-      const dates = calendar.map(r => r.start_date).filter(Boolean).sort()
-      const endDates = calendar.map(r => r.end_date).filter(Boolean).sort()
-      validFrom = dates[0] ? `${dates[0].substring(0, 4)}-${dates[0].substring(4, 6)}-${dates[0].substring(6, 8)}` : null
-      validTo = endDates[endDates.length - 1] ? `${endDates[endDates.length - 1].substring(0, 4)}-${endDates[endDates.length - 1].substring(4, 6)}-${endDates[endDates.length - 1].substring(6, 8)}` : null
+      const starts = calendar.map(r => r.start_date).filter(Boolean).sort()
+      const ends   = calendar.map(r => r.end_date).filter(Boolean).sort()
+      const fmt = (d: string) => `${d.substring(0,4)}-${d.substring(4,6)}-${d.substring(6,8)}`
+      validFrom = starts[0] ? fmt(starts[0]) : null
+      validTo   = ends[ends.length - 1] ? fmt(ends[ends.length - 1]) : null
     }
 
     if (feedInfoCsv) {
-      const feedInfo = parseCsv(feedInfoCsv)
-      feedVersion = feedInfo[0]?.feed_version ?? null
+      feedVersion = parseCsv(feedInfoCsv)[0]?.feed_version ?? null
     }
 
     await sql`
@@ -160,8 +148,8 @@ async function runRefresh(): Promise<NextResponse> {
 
     return NextResponse.json({
       success: true,
-      tram_routes: tramRouteIds.size,
-      stops_updated: updatedCount,
+      tram_routes: tramRouteMap.size,
+      tram_stops_upserted: upsertedCount,
       feed_version: feedVersion,
       valid_from: validFrom,
       valid_to: validTo,
