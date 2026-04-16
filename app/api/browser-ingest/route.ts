@@ -27,16 +27,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'readings batch must not exceed 30 items' }, { status: 400 })
   }
 
+  // Validate format strictly but skip out-of-range readings (rather than
+  // aborting the whole batch — one bad reading should not discard all others).
+  const valid: IngestReading[] = []
   for (const r of body.readings) {
-    if (!isValidIso(r.ts)) {
-      return NextResponse.json({ error: `Invalid timestamp: ${r.ts}` }, { status: 400 })
-    }
-    if (typeof r.db_raw !== 'number' || !isFinite(r.db_raw)) {
-      return NextResponse.json({ error: 'db_raw must be a finite number' }, { status: 400 })
-    }
-    if (r.db_raw < 0 || r.db_raw > 200) {
-      return NextResponse.json({ error: 'db_raw out of plausible range (0–200)' }, { status: 400 })
-    }
+    if (!isValidIso(r.ts)) continue
+    if (typeof r.db_raw !== 'number' || !isFinite(r.db_raw)) continue
+    if (r.db_raw < -60 || r.db_raw > 200) continue   // skip implausible values
+    valid.push(r)
+  }
+  if (valid.length === 0) {
+    return NextResponse.json({ error: 'No valid readings in batch' }, { status: 400 })
   }
 
   // Auto-create tables on first use (before /api/setup is run)
@@ -75,7 +76,7 @@ export async function POST(req: NextRequest) {
   } catch { /* non-fatal */ }
 
   let inserted = 0
-  for (const r of body.readings) {
+  for (const r of valid) {
     const dbCal = r.db_raw + offsetDb
     await sql`
       INSERT INTO readings (ts, source, db_raw, db_cal, tram_flag)

@@ -173,9 +173,10 @@ export function LiveChart() {
   const [schedule,  setSchedule]  = useState<TramDep[]>([])
   const [loading,   setLoading]   = useState(true)
   const [error,     setError]     = useState<string | null>(null)
-  const [micActive, setMicActive] = useState(false)
-  const [micDb,     setMicDb]     = useState<number | null>(null)
-  const [micError,  setMicError]  = useState<string | null>(null)
+  const [micActive,    setMicActive]    = useState(false)
+  const [micDb,        setMicDb]        = useState<number | null>(null)
+  const [micError,     setMicError]     = useState<string | null>(null)
+  const [micSaveError, setMicSaveError] = useState<string | null>(null)
   const [bands,      setBands]     = useState<number[]>([])
   const [tramScore,  setTramScore] = useState<number>(0)
   const [manualTags, setManualTags] = useState<ManualTag[]>([])
@@ -296,12 +297,22 @@ export function LiveChart() {
     ctxRef.current?.close().catch(() => {})
     streamRef.current = ctxRef.current = analyserRef.current = freqBufRef.current = null
     currentDbRef.current = null
+    // Drain any remaining unflushed readings before clearing the buffer
+    const remaining = flushBuf.current.splice(0)
+    for (let i = 0; i < remaining.length; i += 30) {
+      fetch('/api/browser-ingest', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ readings: remaining.slice(i, i + 30) }),
+      }).catch(() => {})
+    }
     flushBuf.current  = []
     lastTickMs.current  = 0
     lastStoreMs.current = 0
     setMicActive(false)
     setMicDb(null)
     setMicPoints([])
+    setMicSaveError(null)
     setBands([])
     setTramScore(0)
     setManualTags([])
@@ -390,16 +401,27 @@ export function LiveChart() {
       }
       rafRef.current = requestAnimationFrame(tick)
 
-      // Background DB flush
-      flushTimer.current = setInterval(() => {
+      // Background DB flush — reports errors visibly instead of swallowing them
+      const doFlush = async () => {
         const batch = flushBuf.current.splice(0, 30)
         if (!batch.length) return
-        fetch('/api/browser-ingest', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ readings: batch }),
-        }).catch(() => {})
-      }, MIC_FLUSH_MS)
+        try {
+          const res = await fetch('/api/browser-ingest', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ readings: batch }),
+          })
+          if (res.ok) {
+            setMicSaveError(null)
+          } else {
+            const err = await res.json().catch(() => ({}))
+            setMicSaveError(`Save error ${res.status}: ${(err as {error?: string}).error ?? 'unknown'}`)
+          }
+        } catch (e) {
+          setMicSaveError(`Save error: ${e instanceof Error ? e.message : 'network'}`)
+        }
+      }
+      flushTimer.current = setInterval(doFlush, MIC_FLUSH_MS)
 
       setMicActive(true)
     } catch (e) {
@@ -485,7 +507,8 @@ export function LiveChart() {
               {micActive ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
               {micActive ? 'Stop mic' : 'Use mic'}
             </Button>
-            {micError && <span className="text-xs text-destructive max-w-[200px] text-right">{micError}</span>}
+            {micError     && <span className="text-xs text-destructive max-w-[200px] text-right">{micError}</span>}
+          {micSaveError && <span className="text-xs text-orange-400 max-w-[200px] text-right">{micSaveError}</span>}
           </div>
         </div>
       </div>
