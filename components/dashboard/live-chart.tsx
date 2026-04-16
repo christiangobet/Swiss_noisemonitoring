@@ -351,27 +351,35 @@ export function LiveChart() {
               ]}
             />
 
-            {/* Tram departure bands */}
+            {/* Tram departure bands + exact-time markers */}
             {visibleTrams.map((dep, i) => {
               const ms    = new Date(dep.expected).getTime()
               const color = lineColor(dep.line)
-              return (
+              const label = `${dep.line} → ${dep.direction.split(' ').slice(0, 2).join(' ')}`
+              return [
+                // ±15 s shaded band
                 <ReferenceArea
-                  key={`${dep.line}-${dep.expected}-${i}`}
+                  key={`band-${dep.line}-${dep.expected}-${i}`}
                   x1={ms - TRAM_PAD_MS}
                   x2={ms + TRAM_PAD_MS}
-                  fill={withAlpha(color, 0.13)}
-                  stroke={withAlpha(color, 0.5)}
-                  strokeWidth={1}
+                  fill={withAlpha(color, 0.18)}
+                  stroke="none"
+                />,
+                // Exact departure line + label
+                <ReferenceLine
+                  key={`line-${dep.line}-${dep.expected}-${i}`}
+                  x={ms}
+                  stroke={color}
+                  strokeWidth={1.5}
                   label={{
-                    value: `${dep.line} ${dep.direction.split(' ')[0]}`,
-                    position: 'insideTopLeft',
+                    value: label,
+                    position: 'insideTopRight',
                     fill: color,
                     fontSize: 9,
-                    fontWeight: 600,
+                    fontWeight: 700,
                   }}
-                />
-              )
+                />,
+              ]
             })}
 
             {/* ES II noise limit */}

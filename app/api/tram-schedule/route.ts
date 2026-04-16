@@ -20,7 +20,10 @@ export async function GET() {
     const departures = await getUpcomingTrams(stopIds)
 
     return NextResponse.json({ departures, count: departures.length })
-  } catch (err) {
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'code' in err && err.code === '42P01') {
+      return NextResponse.json({ departures: [], count: 0 })
+    }
     console.error('tram-schedule error:', err)
     return NextResponse.json({ error: 'Failed to fetch tram schedule', detail: String(err) }, { status: 503 })
   }
