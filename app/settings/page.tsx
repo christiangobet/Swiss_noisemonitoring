@@ -11,6 +11,7 @@ import { NOISE_LIMITS } from '@/lib/db'
 import { formatZurichTime } from '@/lib/utils'
 import { Search, RefreshCw, CheckCircle2, AlertCircle, Save, MapPin, ChevronDown, ChevronUp } from 'lucide-react'
 import { toast } from '@/hooks/use-toast'
+import { BrowserMicCard } from '@/components/settings/browser-mic'
 
 interface Platform {
   stop_id: string
@@ -414,6 +415,9 @@ export default function SettingsPage() {
           </Button>
         </CardContent>
       </Card>
+
+      {/* ── Browser Microphone ──────────────────────────────────────────────── */}
+      <BrowserMicCard />
 
       {/* ── Sensor Status ────────────────────────────────────────────────────── */}
       <Card>
