@@ -3,8 +3,18 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
 
+interface StopData {
+  stop_id: string
+  stop_name: string
+  line: string
+  headsign: string | null
+}
+
 interface SaveBody {
-  stops: string[]  // array of stop_ids to mark active; all others deactivated
+  /** IDs of platforms to activate. */
+  stops: string[]
+  /** Full platform data for new stops (from search results). Used to upsert if not yet in DB. */
+  stop_data?: StopData[]
 }
 
 export async function POST(req: NextRequest) {
@@ -20,15 +30,37 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // Deactivate all current stops
+    // Deactivate all existing active stops
     await sql`UPDATE tram_stops_config SET active = FALSE`
 
-    // Activate the selected ones
     if (body.stops.length > 0) {
       for (const stopId of body.stops) {
-        await sql`
-          UPDATE tram_stops_config SET active = TRUE WHERE stop_id = ${stopId}
-        `
+        // Find full data for this stop from the request (so we can upsert new stops)
+        const data = body.stop_data?.find(s => s.stop_id === stopId)
+
+        if (data) {
+          // Upsert — handles both transport.opendata.ch IDs (new) and GTFS IDs (legacy)
+          await sql`
+            INSERT INTO tram_stops_config (stop_id, stop_name, line, headsign, active)
+            VALUES (
+              ${data.stop_id},
+              ${data.stop_name},
+              ${data.line || ''},
+              ${data.headsign ?? null},
+              TRUE
+            )
+            ON CONFLICT (stop_id) DO UPDATE SET
+              stop_name = EXCLUDED.stop_name,
+              line      = EXCLUDED.line,
+              headsign  = EXCLUDED.headsign,
+              active    = TRUE
+          `
+        } else {
+          // Fallback: ID already in DB (from GTFS or prior save), just activate it
+          await sql`
+            UPDATE tram_stops_config SET active = TRUE WHERE stop_id = ${stopId}
+          `
+        }
       }
     }
 

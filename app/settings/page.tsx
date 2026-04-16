@@ -148,10 +148,23 @@ export default function SettingsPage() {
   const saveStops = async () => {
     setSavingStops(true)
     try {
+      // Collect full platform data so the save route can upsert new stops
+      // (transport.opendata.ch IDs won't be in the DB yet)
+      const allPlatforms = displayResults.flatMap(g => g.platforms)
+      const stopData = allPlatforms.filter(p => selectedStops.has(p.stop_id))
+
       const res = await fetch('/api/stops/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stops: Array.from(selectedStops) }),
+        body: JSON.stringify({
+          stops: Array.from(selectedStops),
+          stop_data: stopData.map(p => ({
+            stop_id:   p.stop_id,
+            stop_name: p.stop_name,
+            line:      p.line,
+            headsign:  p.headsign,
+          })),
+        }),
       })
       if (res.ok) {
         toast({ title: 'Platforms saved', description: `${selectedStops.size} platform(s) active` })
