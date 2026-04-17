@@ -862,11 +862,10 @@ export function LiveChart() {
         </ResponsiveContainer>
       )}
 
-      {/* Sync status — DB reading counts + age; warns when both devices use the same source */}
+      {/* Sync status — DB reading counts + age */}
       {(() => {
         const nowMs = Date.now()
         const fmtAge = (ms: number | null) => ms ? `${Math.round((nowMs - ms) / 1000)}s ago` : 'never'
-        const bothSameSource = micActive && dbStatus.int > 0 && dbStatus.ext === 0
         return (
           <div className="flex flex-wrap items-center gap-3 px-2 text-[10px]">
             <span className={dbStatus.ext > 0 ? 'text-amber-400/80' : 'text-muted-foreground/40'}>
@@ -875,11 +874,6 @@ export function LiveChart() {
             <span className={dbStatus.int > 0 ? 'text-blue-400/80' : 'text-muted-foreground/40'}>
               Int DB: {dbStatus.int} pts · last {fmtAge(dbStatus.lastIntMs)}
             </span>
-            {bothSameSource && (
-              <Link href="/settings" className="text-orange-400 font-medium hover:underline">
-                ⚠ Both devices on Interior — set one to Exterior in Settings
-              </Link>
-            )}
           </div>
         )
       })()}
