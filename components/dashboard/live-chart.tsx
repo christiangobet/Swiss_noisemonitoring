@@ -273,7 +273,7 @@ export function LiveChart() {
         const tsMap = new Map<string, number>()
         for (const r of readings) tsMap.set(r.ts, r.db_cal ?? r.db_raw)
         sourceMap[src] = tsMap
-        for (const ts of tsMap.keys()) allTs.add(ts)
+        tsMap.forEach((_, ts) => allTs.add(ts))
       }
 
       const filteredTs = Array.from(allTs)
