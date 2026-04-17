@@ -24,7 +24,7 @@ export const MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS readings (
   id           BIGSERIAL PRIMARY KEY,
   ts           TIMESTAMPTZ NOT NULL,
-  source       TEXT NOT NULL CHECK (source IN ('exterior','interior')),
+  source       TEXT NOT NULL,
   db_raw       REAL NOT NULL,
   db_cal       REAL,
   tram_flag    BOOLEAN DEFAULT FALSE,
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS gtfs_meta (
 export interface Reading {
   id: number
   ts: string
-  source: 'exterior' | 'interior'
+  source: string
   db_raw: number
   db_cal: number | null
   tram_flag: boolean

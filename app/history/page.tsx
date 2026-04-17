@@ -21,7 +21,7 @@ import { Download, RefreshCw } from 'lucide-react'
 
 interface Reading {
   ts: string
-  source: 'exterior' | 'interior'
+  source: string
   db_cal: number | null
 }
 
@@ -33,16 +33,13 @@ interface TramEvent {
   tram_dir: string | null
   peak_db_ext: number | null
   mean_db_ext: number | null
-  peak_db_int: number | null
-  attenuation_db: number | null
   delta_bg_db: number | null
 }
 
 interface ChartPoint {
   label: string
   ts: string
-  ext: number | null
-  int: number | null
+  [source: string]: string | number | null
 }
 
 type Resolution = 'minute' | 'hour' | 'day'
@@ -91,36 +88,31 @@ export default function HistoryPage() {
         setTramEvents(tramData.events)
       }
 
-      // Aggregate by resolution
-      const buckets = new Map<string, { extSum: number; intSum: number; count: number; extLinear: number; intLinear: number; linCount: number }>()
+      // Aggregate by resolution per source
+      const buckets = new Map<string, Map<string, { linear: number; count: number }>>()
       for (const r of readData.readings) {
         if (r.db_cal == null) continue
         const bucket = truncateByResolution(r.ts, resolution)
-        if (!buckets.has(bucket)) {
-          buckets.set(bucket, { extSum: 0, intSum: 0, count: 0, extLinear: 0, intLinear: 0, linCount: 0 })
-        }
-        const b = buckets.get(bucket)!
-        if (r.source === 'exterior') {
-          b.extLinear += Math.pow(10, r.db_cal / 10)
-          b.extSum += r.db_cal
-          b.count++
-        } else {
-          b.intLinear += Math.pow(10, r.db_cal / 10)
-          b.intSum += r.db_cal
-        }
-        b.linCount++
+        if (!buckets.has(bucket)) buckets.set(bucket, new Map())
+        const srcMap = buckets.get(bucket)!
+        if (!srcMap.has(r.source)) srcMap.set(r.source, { linear: 0, count: 0 })
+        const b = srcMap.get(r.source)!
+        b.linear += Math.pow(10, r.db_cal / 10)
+        b.count++
       }
 
       const points: ChartPoint[] = Array.from(buckets.entries())
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([ts, b]) => ({
-          ts,
-          label: resolution === 'day'
-            ? formatZurichTime(ts, 'date')
-            : formatZurichTime(ts, 'datetime'),
-          ext: b.extLinear > 0 ? 10 * Math.log10(b.extLinear / b.count) : null,
-          int: b.intLinear > 0 ? 10 * Math.log10(b.intLinear / b.linCount) : null,
-        }))
+        .map(([ts, srcMap]) => {
+          const pt: ChartPoint = {
+            ts,
+            label: resolution === 'day' ? formatZurichTime(ts, 'date') : formatZurichTime(ts, 'datetime'),
+          }
+          srcMap.forEach(({ linear, count }, src) => {
+            pt[src] = linear > 0 ? 10 * Math.log10(linear / count) : null
+          })
+          return pt
+        })
 
       setChartData(points)
     } catch (err) {
@@ -133,9 +125,10 @@ export default function HistoryPage() {
   useEffect(() => { fetchData() }, [fetchData])
 
   const downloadCsv = () => {
-    const header = 'timestamp,source,db_ext,db_int\n'
+    const srcKeys = Array.from(new Set(chartData.flatMap(p => Object.keys(p).filter(k => k !== 'ts' && k !== 'label')))).sort()
+    const header = ['timestamp', ...srcKeys].join(',') + '\n'
     const rows = chartData.map(p =>
-      `${p.ts},both,${p.ext?.toFixed(2) ?? ''},${p.int?.toFixed(2) ?? ''}`
+      [p.ts, ...srcKeys.map(k => typeof p[k] === 'number' ? (p[k] as number).toFixed(2) : '')].join(',')
     ).join('\n')
     const blob = new Blob([header + rows], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
@@ -238,8 +231,10 @@ export default function HistoryPage() {
                 <Legend wrapperStyle={{ fontSize: '12px' }} />
                 <ReferenceLine y={NOISE_LIMITS.day} stroke="#ef4444" strokeDasharray="6 3" label={{ value: `Day ${NOISE_LIMITS.day}dB`, position: 'right', fill: '#ef4444', fontSize: 10 }} />
                 <ReferenceLine y={NOISE_LIMITS.night} stroke="#f97316" strokeDasharray="6 3" label={{ value: `Night ${NOISE_LIMITS.night}dB`, position: 'right', fill: '#f97316', fontSize: 10 }} />
-                <Line type="monotone" dataKey="ext" name="Exterior" stroke="#F59E0B" strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
-                <Line type="monotone" dataKey="int" name="Interior" stroke="#60A5FA" strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
+                {Array.from(new Set(chartData.flatMap(p => Object.keys(p).filter(k => k !== 'ts' && k !== 'label')))).sort().map((src, i) => {
+                  const colors = ['#F59E0B', '#60A5FA', '#34D399', '#F87171', '#A78BFA', '#FB923C']
+                  return <Line key={src} type="monotone" dataKey={src} name={src} stroke={colors[i % colors.length]} strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
+                })}
               </ComposedChart>
             </ResponsiveContainer>
           )}
@@ -264,9 +259,8 @@ export default function HistoryPage() {
                     <th className="text-left py-2 pr-4 text-muted-foreground font-medium">Time</th>
                     <th className="text-left py-2 pr-4 text-muted-foreground font-medium">Line</th>
                     <th className="text-left py-2 pr-4 text-muted-foreground font-medium">Direction</th>
-                    <th className="text-right py-2 pr-4 text-muted-foreground font-medium">Peak Ext</th>
-                    <th className="text-right py-2 pr-4 text-muted-foreground font-medium">Peak Int</th>
-                    <th className="text-right py-2 text-muted-foreground font-medium">Attenuation</th>
+                    <th className="text-right py-2 pr-4 text-muted-foreground font-medium">Peak dB</th>
+                    <th className="text-right py-2 text-muted-foreground font-medium">Δ Background</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -282,11 +276,8 @@ export default function HistoryPage() {
                       <td className="py-2 pr-4 text-right font-db">
                         {ev.peak_db_ext?.toFixed(1) ?? '—'} dB
                       </td>
-                      <td className="py-2 pr-4 text-right font-db text-blue-400">
-                        {ev.peak_db_int?.toFixed(1) ?? '—'} dB
-                      </td>
                       <td className="py-2 text-right font-db">
-                        {ev.attenuation_db?.toFixed(1) ?? '—'} dB
+                        {ev.delta_bg_db?.toFixed(1) ?? '—'} dB
                       </td>
                     </tr>
                   ))}

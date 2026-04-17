@@ -203,9 +203,9 @@ export function LiveChart() {
   const [, startTransition] = useTransition()
 
   // ── Device identity ──────────────────────────────────────────────────────────
-  const [micSource,    setMicSourceState]    = useState<string>('interior')
+  const [micSource,    setMicSourceState]    = useState<string>('default')
   const [deviceLabel,  setDeviceLabelState]  = useState('')
-  const micSourceRef   = useRef<string>('interior')
+  const micSourceRef   = useRef<string>('default')
   const deviceLabelRef = useRef<string>('')
   const deviceIdRef    = useRef<string>('')
 

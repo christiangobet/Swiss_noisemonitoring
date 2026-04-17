@@ -79,7 +79,7 @@ export function TramStats() {
               Tram Noise Impact
             </CardTitle>
             <CardDescription className="mt-0.5">
-              Peak exterior dB per line &amp; direction — learned from recorded passages
+              Peak dB per line &amp; direction — learned from recorded passages
               {lastRun && (
                 <span className="ml-2 opacity-60">
                   · updated {formatZurichTime(lastRun.toISOString(), 'time')}
@@ -103,7 +103,7 @@ export function TramStats() {
           <Skeleton className="h-24 w-full" />
         ) : summary.length === 0 ? (
           <p className="text-sm text-muted-foreground py-4 text-center">
-            No passages detected yet. The system needs exterior sensor data with tram flags.<br />
+            No passages detected yet. Press T in the live chart to tag a tram passage.<br />
             <span className="text-xs opacity-70">Runs automatically every 5 minutes once readings are being ingested.</span>
           </p>
         ) : (

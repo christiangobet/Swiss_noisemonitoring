@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
 
   // Accept any valid source name (alphanumeric / dash / underscore, ≤32 chars)
   const rawSource = typeof body.source === 'string' ? body.source.trim() : ''
-  const source = /^[a-zA-Z0-9_-]{1,32}$/.test(rawSource) ? rawSource : 'interior'
+  const source = /^[a-zA-Z0-9_-]{1,32}$/.test(rawSource) ? rawSource : 'default'
   const deviceId    = typeof body.device_id    === 'string' ? body.device_id.slice(0, 64)  : null
   const deviceLabel = typeof body.device_label === 'string' ? body.device_label.slice(0, 64) : null
 

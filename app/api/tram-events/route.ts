@@ -33,8 +33,7 @@ export async function GET(req: NextRequest) {
           tram_dir,
           LAG(ts) OVER (ORDER BY ts) AS prev_ts
         FROM readings
-        WHERE source = 'exterior'
-          AND tram_flag = TRUE
+        WHERE tram_flag = TRUE
           AND ts >= ${defaultFrom}
           AND ts <= ${defaultTo}
           AND (${line}::text IS NULL OR tram_line = ${line})
@@ -69,8 +68,7 @@ export async function GET(req: NextRequest) {
         const intResult = await sql`
           SELECT AVG(db_cal) AS mean_db_int, MAX(db_cal) AS peak_db_int
           FROM readings
-          WHERE source = 'interior'
-            AND ts >= ${row.started_at as string}
+          WHERE ts >= ${row.started_at as string}
             AND ts <= ${row.ended_at as string}
             AND db_cal IS NOT NULL
         `
@@ -78,8 +76,7 @@ export async function GET(req: NextRequest) {
         const bgResult = await sql`
           SELECT AVG(db_cal) AS bg_db
           FROM readings
-          WHERE source = 'exterior'
-            AND tram_flag = FALSE
+          WHERE tram_flag = FALSE
             AND ts >= ${new Date(new Date(row.started_at as string).getTime() - 5 * 60000).toISOString()}
             AND ts < ${row.started_at as string}
             AND db_cal IS NOT NULL

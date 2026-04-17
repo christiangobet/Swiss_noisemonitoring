@@ -13,9 +13,7 @@ export async function GET(req: NextRequest) {
   const limitParam = searchParams.get('limit')
   const limit = Math.min(parseInt(limitParam ?? '500', 10), 1000)
 
-  if (source !== 'exterior' && source !== 'interior' && source !== 'both') {
-    return NextResponse.json({ error: 'source must be exterior, interior, or both' }, { status: 400 })
-  }
+  // source can be any valid source name, or omitted/'all' to return all sources
   if (from && !isValidIso(from)) {
     return NextResponse.json({ error: 'Invalid from timestamp' }, { status: 400 })
   }
@@ -26,7 +24,7 @@ export async function GET(req: NextRequest) {
   try {
     let rawRows
 
-    if (source === 'both') {
+    if (source === 'both' || source === 'all' || !source) {
       if (from && to) {
         rawRows = await sql`
           SELECT id, ts, source, db_raw, db_cal, tram_flag, tram_line, tram_stop, tram_dir

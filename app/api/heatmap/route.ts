@@ -13,8 +13,7 @@ export async function GET() {
         EXTRACT(DOW FROM ts AT TIME ZONE 'Europe/Zurich')::int AS dow,
         AVG(db_cal) AS mean_db
       FROM readings
-      WHERE source = 'exterior'
-        AND db_cal IS NOT NULL
+      WHERE db_cal IS NOT NULL
         AND ts >= ${since}
       GROUP BY
         EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich'),

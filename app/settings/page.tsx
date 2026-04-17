@@ -51,7 +51,7 @@ interface SensorStatus {
 
 export default function SettingsPage() {
   // ── This-device identity (localStorage) ─────────────────────────────────────
-  const [deviceSource, setDeviceSourceState] = useState<string>('interior')
+  const [deviceSource, setDeviceSourceState] = useState<string>('default')
   const [deviceLabel,  setDeviceLabelState]  = useState('')
   const [deviceId,     setDeviceId]          = useState('')
 
@@ -331,9 +331,9 @@ export default function SettingsPage() {
               value={deviceSource}
               onChange={e => {
                 const v = e.target.value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32)
-                handleDeviceSource(v || 'interior')
+                handleDeviceSource(v || 'default')
               }}
-              placeholder="e.g. interior, roof, iphone"
+              placeholder="e.g. roof, iphone, laptop"
               className="max-w-xs font-mono"
             />
             <p className="text-xs text-muted-foreground">
@@ -600,39 +600,6 @@ export default function SettingsPage() {
 
       {/* ── Browser Microphone ──────────────────────────────────────────────── */}
       <BrowserMicCard />
-
-      {/* ── Sensor Status ────────────────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Sensor Status</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-4">
-            {(['exterior', 'interior'] as const).map(src => {
-              const sensor = sensors?.[src]
-              const online = sensor?.online ?? false
-              return (
-                <div key={src} className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    {online
-                      ? <CheckCircle2 className="h-4 w-4 text-green-500" />
-                      : <AlertCircle className="h-4 w-4 text-red-500" />}
-                    <span className="text-sm font-medium text-foreground capitalize">{src}</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {sensor?.last_seen
-                      ? `Last seen: ${formatZurichTime(sensor.last_seen, 'time')}`
-                      : 'Never seen'}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {src === 'exterior' ? 'Benetech GM1356 (USB SPL)' : 'USB Microphone (PyAudio)'}
-                  </p>
-                </div>
-              )
-            })}
-          </div>
-        </CardContent>
-      </Card>
 
       {/* ── Swiss LSV Noise Limits ───────────────────────────────────────────── */}
       <Card>

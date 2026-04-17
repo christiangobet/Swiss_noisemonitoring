@@ -30,8 +30,7 @@ export async function POST() {
       SELECT ts, db_cal, tram_line, tram_dir, tram_stop
       FROM readings
       WHERE tram_flag   = TRUE
-        AND source      = 'exterior'
-        AND db_cal      IS NOT NULL
+        AND db_cal IS NOT NULL
         AND tram_line   IS NOT NULL
       ORDER BY tram_line, tram_dir, ts ASC
     `
