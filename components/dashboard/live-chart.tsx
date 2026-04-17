@@ -25,16 +25,16 @@ interface Reading {
   db_cal: number | null
 }
 
-interface ChartPoint {
+// Flat chart point: tsMs plus one optional key per source
+type ChartPoint = {
   tsMs: number
-  ext: number | null
-  int: number | null
+  [source: string]: number | null | undefined
 }
 
 interface ManualTag {
-  tagMs:   number   // when user pressed T — visual anchor
-  startMs: number   // detected passage start (auto-expanded)
-  endMs:   number   // detected passage end (auto-expanded)
+  tagMs:   number
+  startMs: number
+  endMs:   number
 }
 
 interface TramDep {
@@ -58,22 +58,22 @@ function withAlpha(hex: string, a: number) {
   return `rgba(${r},${g},${b},${a})`
 }
 
+// ── Source colours (one per named source) ────────────────────────────────────
+const SOURCE_COLORS = [
+  '#F59E0B', '#60A5FA', '#34D399', '#F87171',
+  '#A78BFA', '#FB923C', '#E879F9', '#2DD4BF',
+]
+
 // ── Constants ─────────────────────────────────────────────────────────────────
-const HISTORY_MS    = 3 * 60 * 1000  // 3 min history
-const FUTURE_MS     = 2 * 60 * 1000  // 2 min future
-const TRAM_PAD_MS   = 20 * 1000      // ±20 s tram band
-const CHART_TICK_MS   = 250    // display refresh — smooth ECG
-const STORAGE_TICK_MS = 1000   // one sample/s written to DB (10× fewer writes)
-const MIC_FLUSH_MS    = 5000   // flush to DB every 5 s (5 readings/batch)
-const DB_OFFSET       = 94     // dBFS → rough dBSPL
+const HISTORY_MS    = 3 * 60 * 1000
+const FUTURE_MS     = 2 * 60 * 1000
+const TRAM_PAD_MS   = 20 * 1000
+const CHART_TICK_MS   = 250
+const STORAGE_TICK_MS = 1000
+const MIC_FLUSH_MS    = 5000
+const DB_OFFSET       = 94
 
 // ── Frequency analysis ────────────────────────────────────────────────────────
-// 8 octave bands. Groups follow acoustic research on tram noise:
-//   low     → broadband mechanical base (not very discriminative on its own)
-//   rolling → impact/rolling noise 500–1 kHz
-//   squeal  → squeal / tonal peaks 1–5 kHz  ← most discriminative
-//   flange  → flanging / broadband >5 kHz
-
 type BandGroup = 'low' | 'rolling' | 'squeal' | 'flange'
 
 const BANDS: Array<{ label: string; fMin: number; fMax: number; group: BandGroup }> = [
@@ -88,13 +88,12 @@ const BANDS: Array<{ label: string; fMin: number; fMax: number; group: BandGroup
 ]
 
 const GROUP_COLOR: Record<BandGroup, string> = {
-  low:     '#64748b',  // slate  — not used in score
-  rolling: '#f97316',  // orange — rolling/impact
-  squeal:  '#eab308',  // yellow — squeal, most discriminative
-  flange:  '#ef4444',  // red    — flanging / broadband HF
+  low:     '#64748b',
+  rolling: '#f97316',
+  squeal:  '#eab308',
+  flange:  '#ef4444',
 }
 
-// Baseline window: 2 min × 4 frames/s = 480 frames (10th-percentile → true ambient floor)
 const BASELINE_FRAMES = 480
 
 function computeBands(freqData: Float32Array<ArrayBuffer>, sampleRate: number): number[] {
@@ -110,59 +109,42 @@ function computeBands(freqData: Float32Array<ArrayBuffer>, sampleRate: number): 
 
 interface TramScore { score: number; rolling: number; squeal: number; flange: number }
 
-// Relative detection: compare band power against the rolling ambient baseline.
-// Each sub-score is 0–100 % where 0 dB above floor → 0 % and 10 dB above floor → 100 %.
-// Combined score weights squeal highest (most discriminative for trams).
 function computeTramScore(bands: number[], baseline: number[]): TramScore {
   if (baseline.length < BANDS.length) return { score: 0, rolling: 0, squeal: 0, flange: 0 }
-
-  // Elevation in dB above the ambient floor for a group of bands.
-  // Uses energy-summed power comparison so one loud bin dominates the group correctly.
   const elevDb = (idxs: number[]) => {
     const curLin = idxs.reduce((s, i) => s + Math.pow(10, bands[i]    / 10), 0)
     const basLin = idxs.reduce((s, i) => s + Math.pow(10, baseline[i] / 10), 0)
     if (basLin < 1e-30) return 0
     const dBAbove = 10 * Math.log10(curLin / basLin)
-    // 0 dB above floor → 0 %;  10 dB above floor → 100 %
     return Math.round(Math.min(100, Math.max(0, dBAbove * 10)))
   }
-
-  const rolling = elevDb([3, 4])   // 500 Hz – 1 kHz  impact / rolling
-  const squeal  = elevDb([5, 6])   // 1–5 kHz          squeal (most discriminative)
-  const flange  = elevDb([7])      // >5 kHz            flanging / broadband HF
-
-  // Weighted sum; all three must contribute to avoid single-band false positives
+  const rolling = elevDb([3, 4])
+  const squeal  = elevDb([5, 6])
+  const flange  = elevDb([7])
   const score = Math.round(0.40 * squeal + 0.35 * rolling + 0.25 * flange)
   return { score, rolling, squeal, flange }
 }
 
-/**
- * Given a set of recent dB readings and a user-tag timestamp, walk backwards
- * and forwards to find where the elevated noise actually starts and ends.
- * Uses the 15th-percentile of readings in the search window as the baseline;
- * anything ≥ baseline + THRESHOLD_DB counts as "passage noise".
- */
-const PASSAGE_THRESHOLD_DB = 3.5   // dB above ambient to count as passage
-const PASSAGE_LOOK_MS      = 90_000 // look up to ±90 s from the tag
+const PASSAGE_THRESHOLD_DB = 3.5
+const PASSAGE_LOOK_MS      = 90_000
 
 function detectPassageBounds(
   points: ChartPoint[],
-  tagMs: number
+  tagMs: number,
+  source: string,
 ): { startMs: number; endMs: number } {
   const window = points
-    .filter(p => p.int !== null &&
+    .filter(p => p[source] != null &&
       p.tsMs >= tagMs - PASSAGE_LOOK_MS &&
       p.tsMs <= tagMs + PASSAGE_LOOK_MS)
     .sort((a, b) => a.tsMs - b.tsMs)
 
   if (window.length < 4) return { startMs: tagMs - 5000, endMs: tagMs + 5000 }
 
-  // Baseline: 15th percentile across the search window
-  const sorted   = window.map(p => p.int as number).sort((a, b) => a - b)
+  const sorted   = window.map(p => p[source] as number).sort((a, b) => a - b)
   const baseline = sorted[Math.floor(sorted.length * 0.15)]
   const threshold = baseline + PASSAGE_THRESHOLD_DB
 
-  // Index of point closest to tag time
   let nearestIdx = 0
   let nearestDist = Infinity
   for (let i = 0; i < window.length; i++) {
@@ -170,21 +152,18 @@ function detectPassageBounds(
     if (d < nearestDist) { nearestDist = d; nearestIdx = i }
   }
 
-  // Walk backwards to find where level drops below threshold
   let startIdx = nearestIdx
   for (let i = nearestIdx; i >= 0; i--) {
-    if ((window[i].int as number) < threshold) break
+    if ((window[i][source] as number) < threshold) break
     startIdx = i
   }
 
-  // Walk forwards to find where level drops below threshold
   let endIdx = nearestIdx
   for (let i = nearestIdx; i < window.length; i++) {
-    if ((window[i].int as number) < threshold) break
+    if ((window[i][source] as number) < threshold) break
     endIdx = i
   }
 
-  // Ensure a minimum ±5 s span so the tag is always visible on the chart
   return {
     startMs: Math.min(window[startIdx].tsMs, tagMs - 5000),
     endMs:   Math.max(window[endIdx].tsMs,   tagMs + 5000),
@@ -197,7 +176,7 @@ function getRmsDb(analyser: AnalyserNode): number | null {
   let sum = 0
   for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i]
   const rms = Math.sqrt(sum / buf.length)
-  if (rms < 1e-6) return null   // context suspended or no signal
+  if (rms < 1e-6) return null
   return 20 * Math.log10(rms) + DB_OFFSET
 }
 
@@ -218,17 +197,17 @@ export function LiveChart() {
   const [tramScore,  setTramScore] = useState<TramScore>({ score: 0, rolling: 0, squeal: 0, flange: 0 })
   const [manualTags, setManualTags] = useState<ManualTag[]>([])
   const [tagFlash,   setTagFlash]   = useState(false)
-  const [dbStatus,   setDbStatus]   = useState<{ ext: number; int: number; lastExtMs: number | null; lastIntMs: number | null }>({ ext: 0, int: 0, lastExtMs: null, lastIntMs: null })
+  const [dbStatus,   setDbStatus]   = useState<Record<string, { count: number; lastMs: number | null }>>({})
   const [, startTransition] = useTransition()
 
-  // ── Device identity (localStorage-persisted) ──────────────────────────────
-  const [micSource,    setMicSourceState]    = useState<'interior' | 'exterior'>('interior')
+  // ── Device identity ──────────────────────────────────────────────────────────
+  const [micSource,    setMicSourceState]    = useState<string>('interior')
   const [deviceLabel,  setDeviceLabelState]  = useState('')
-  const micSourceRef   = useRef<'interior' | 'exterior'>('interior')
+  const micSourceRef   = useRef<string>('interior')
   const deviceLabelRef = useRef<string>('')
   const deviceIdRef    = useRef<string>('')
 
-  const setMicSource = useCallback((s: 'interior' | 'exterior') => {
+  const setMicSource = useCallback((s: string) => {
     micSourceRef.current = s
     setMicSourceState(s)
     localStorage.setItem('tramwatchSource', s)
@@ -240,7 +219,6 @@ export function LiveChart() {
     localStorage.setItem('tramwatchDeviceLabel', v)
   }, [])
 
-  // Load / generate device identity from localStorage on mount
   useEffect(() => {
     let id = localStorage.getItem('tramwatchDeviceId')
     if (!id) {
@@ -252,7 +230,7 @@ export function LiveChart() {
     deviceIdRef.current = id
 
     const src = localStorage.getItem('tramwatchSource')
-    if (src === 'exterior') { micSourceRef.current = 'exterior'; setMicSourceState('exterior') }
+    if (src) { micSourceRef.current = src; setMicSourceState(src) }
 
     const label = localStorage.getItem('tramwatchDeviceLabel') ?? ''
     deviceLabelRef.current = label
@@ -266,13 +244,12 @@ export function LiveChart() {
   const rafRef         = useRef<number>(0)
   const flushTimer     = useRef<ReturnType<typeof setInterval> | null>(null)
   const flushBuf       = useRef<Array<{ ts: string; db_raw: number; tram_flag?: boolean }>>([])
-  const lastTickMs     = useRef<number>(0)   // display throttle
-  const lastStoreMs    = useRef<number>(0)   // storage throttle (1/s)
+  const lastTickMs     = useRef<number>(0)
+  const lastStoreMs    = useRef<number>(0)
   const currentDbRef   = useRef<number | null>(null)
   const micPointsRef   = useRef<ChartPoint[]>([])
-  const bandHistoryRef = useRef<number[][]>([])       // rolling band history for ambient baseline
+  const bandHistoryRef = useRef<number[][]>([])
 
-  // Day/night ES II limit
   const limit = useMemo(() => {
     const h = parseInt(
       new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Zurich', hour: 'numeric', hour12: false })
@@ -281,37 +258,42 @@ export function LiveChart() {
     return (h < 6 || h >= 22) ? NOISE_LIMITS.night : NOISE_LIMITS.day
   }, [])
 
-  // ── DB polling (exterior + stored interior) every 2 s ─────────────────────
+  // ── DB polling every 2 s ──────────────────────────────────────────────────
   const fetchLive = useCallback(async () => {
     try {
-      // cache: 'no-store' prevents the browser from serving a stale cached response
       const res = await fetch('/api/live', { cache: 'no-store' })
       if (!res.ok) { setError('Failed to fetch live data'); return }
-      const data: { exterior: Reading[]; interior: Reading[] } = await res.json()
+      const data: { sources: Record<string, Reading[]> } = await res.json()
+
       const cutoff = Date.now() - HISTORY_MS
-      const extMap = new Map<string, number>()
-      // Accept db_raw as fallback so uncalibrated readings still show on chart
-      for (const r of data.exterior) extMap.set(r.ts, r.db_cal ?? r.db_raw)
-      const intMap = new Map<string, number>()
-      for (const r of data.interior) intMap.set(r.ts, r.db_cal ?? r.db_raw)
-      const allTs = Array.from(new Set([
-        ...Array.from(extMap.keys()),
-        ...Array.from(intMap.keys()),
-      ])).filter(ts => new Date(ts).getTime() >= cutoff).sort()
-      setDbPoints(allTs.map(ts => ({
-        tsMs: new Date(ts).getTime(),
-        ext:  extMap.get(ts) ?? null,
-        int:  intMap.get(ts) ?? null,
-      })))
-      // Most-recent timestamp per source (data is in ascending order after reverse())
-      const lastExt = data.exterior.at(-1)
-      const lastInt = data.interior.at(-1)
-      setDbStatus({
-        ext:       extMap.size,
-        int:       intMap.size,
-        lastExtMs: lastExt ? new Date(lastExt.ts).getTime() : null,
-        lastIntMs: lastInt ? new Date(lastInt.ts).getTime() : null,
-      })
+      const sourceMap: Record<string, Map<string, number>> = {}
+      const allTs = new Set<string>()
+
+      for (const [src, readings] of Object.entries(data.sources)) {
+        const tsMap = new Map<string, number>()
+        for (const r of readings) tsMap.set(r.ts, r.db_cal ?? r.db_raw)
+        sourceMap[src] = tsMap
+        for (const ts of tsMap.keys()) allTs.add(ts)
+      }
+
+      const filteredTs = Array.from(allTs)
+        .filter(ts => new Date(ts).getTime() >= cutoff)
+        .sort()
+
+      setDbPoints(filteredTs.map(ts => {
+        const pt: ChartPoint = { tsMs: new Date(ts).getTime() }
+        for (const [src, tsMap] of Object.entries(sourceMap)) {
+          pt[src] = tsMap.get(ts) ?? null
+        }
+        return pt
+      }))
+
+      const newStatus: Record<string, { count: number; lastMs: number | null }> = {}
+      for (const [src, readings] of Object.entries(data.sources)) {
+        const last = readings.at(-1)
+        newStatus[src] = { count: readings.length, lastMs: last ? new Date(last.ts).getTime() : null }
+      }
+      setDbStatus(newStatus)
       setLoading(false)
       setError(null)
     } catch (err) { setError(String(err)) }
@@ -332,14 +314,13 @@ export function LiveChart() {
     return () => { clearInterval(t1); clearInterval(t2) }
   }, [fetchLive, fetchSchedule])
 
-  // Keep ref in sync so tagTram can read it without a stale closure
   useEffect(() => { micPointsRef.current = micPoints }, [micPoints])
 
   // ── Manual tram tag ───────────────────────────────────────────────────────
   const tagTram = useCallback(() => {
     const tagMs = Date.now()
-    // Detect actual passage bounds by walking the noise envelope around the tag
-    const { startMs, endMs } = detectPassageBounds(micPointsRef.current, tagMs)
+    const src   = micSourceRef.current
+    const { startMs, endMs } = detectPassageBounds(micPointsRef.current, tagMs, src)
 
     setManualTags(prev => [
       ...prev.filter(t => t.tagMs >= tagMs - HISTORY_MS),
@@ -348,19 +329,16 @@ export function LiveChart() {
     setTagFlash(true)
     setTimeout(() => setTagFlash(false), 1500)
 
-    // Flush every reading within the detected passage window as tram_flag=true
-    const isExt = micSourceRef.current === 'exterior'
     const passagePoints = micPointsRef.current.filter(
-      p => (isExt ? p.ext : p.int) !== null && p.tsMs >= startMs && p.tsMs <= endMs
+      p => p[src] != null && p.tsMs >= startMs && p.tsMs <= endMs
     )
     for (const p of passagePoints) {
       flushBuf.current.push({
         ts:        new Date(p.tsMs).toISOString(),
-        db_raw:    (isExt ? p.ext : p.int) as number,
+        db_raw:    p[src] as number,
         tram_flag: true,
       })
     }
-    // Always include the exact tag moment in case passagePoints was empty
     const db = currentDbRef.current
     if (db !== null && !passagePoints.some(p => Math.abs(p.tsMs - tagMs) < 500)) {
       flushBuf.current.push({ ts: new Date(tagMs).toISOString(), db_raw: db, tram_flag: true })
@@ -386,7 +364,6 @@ export function LiveChart() {
     ctxRef.current?.close().catch(() => {})
     streamRef.current = ctxRef.current = analyserRef.current = freqBufRef.current = null
     currentDbRef.current = null
-    // Drain any remaining unflushed readings before clearing the buffer
     const remaining = flushBuf.current.splice(0)
     for (let i = 0; i < remaining.length; i += 30) {
       fetch('/api/browser-ingest', {
@@ -416,10 +393,8 @@ export function LiveChart() {
     micPointsRef.current = []
   }, [])
 
-  // Cleanup on unmount
   useEffect(() => stopMic, [stopMic])
 
-  // Resume AudioContext when tab becomes visible again
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === 'visible' && ctxRef.current?.state === 'suspended') {
@@ -444,56 +419,46 @@ export function LiveChart() {
       })
       streamRef.current = stream
 
-      const ctx     = new AudioContext()
-      const src     = ctx.createMediaStreamSource(stream)
+      const ctx      = new AudioContext()
+      const src      = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 4096
-      analyser.smoothingTimeConstant = 0.3   // lower than default 0.8 so frames are distinct enough for ambient baseline
+      analyser.smoothingTimeConstant = 0.3
       src.connect(analyser)
       ctxRef.current      = ctx
       analyserRef.current = analyser
       freqBufRef.current  = new Float32Array(analyser.frequencyBinCount) as Float32Array<ArrayBuffer>
 
-      // requestAnimationFrame loop — pauses automatically when tab is hidden,
-      // no timer throttling, resumes cleanly when tab is visible again.
       const tick = () => {
         const actx = ctxRef.current
         const node = analyserRef.current
         if (!actx || !node) return
 
-        // Keep context alive
         if (actx.state === 'suspended') actx.resume().catch(() => {})
 
         const db   = getRmsDb(node)
         const tsMs = Date.now()
         currentDbRef.current = db
 
-        // Update live dB readout every frame
         setMicDb(db)
 
-        // Update chart + spectrum at display rate (smooth ECG)
         if (tsMs - lastTickMs.current >= CHART_TICK_MS) {
           lastTickMs.current = tsMs
           if (db !== null) {
-            const isExt = micSourceRef.current === 'exterior'
+            const source = micSourceRef.current
             setMicPoints(prev => {
               const cutoff = tsMs - HISTORY_MS
-              const pt: ChartPoint = isExt
-                ? { tsMs, ext: db, int: null }
-                : { tsMs, ext: null, int: db }
+              const pt: ChartPoint = { tsMs, [source]: db }
               return [...prev.filter(p => p.tsMs >= cutoff), pt]
             })
           }
-          // Frequency analysis with rolling ambient baseline
           if (freqBufRef.current) {
             node.getFloatFrequencyData(freqBufRef.current)
             const bv = computeBands(freqBufRef.current, actx.sampleRate)
 
-            // Accumulate band history (60-second window at 250 ms rate)
             bandHistoryRef.current.push([...bv])
             if (bandHistoryRef.current.length > BASELINE_FRAMES) bandHistoryRef.current.shift()
 
-            // Baseline = 20th-percentile per band (ambient floor, not skewed by tram passages)
             const baseline = BANDS.map((_, bi) => {
               if (bandHistoryRef.current.length < 4) return -80
               const col = bandHistoryRef.current.map(f => f[bi]).sort((a, b) => a - b)
@@ -505,7 +470,6 @@ export function LiveChart() {
           }
         }
 
-        // Write to DB at storage rate — 1 sample/s regardless of display rate
         if (db !== null && tsMs - lastStoreMs.current >= STORAGE_TICK_MS) {
           lastStoreMs.current = tsMs
           flushBuf.current.push({ ts: new Date(tsMs).toISOString(), db_raw: db })
@@ -515,7 +479,6 @@ export function LiveChart() {
       }
       rafRef.current = requestAnimationFrame(tick)
 
-      // Background DB flush — reports errors visibly instead of swallowing them
       const doFlush = async () => {
         const batch = flushBuf.current.splice(0, 30)
         if (!batch.length) return
@@ -551,19 +514,17 @@ export function LiveChart() {
     }
   }, [])
 
-  // Stop explicitly (user clicked button) — clears the auto-restart flag
   const handleStopClick = useCallback(() => {
     localStorage.removeItem('tramwatchMicActive')
     stopMic()
   }, [stopMic])
 
-  // Auto-restart mic when navigating back to this page
   useEffect(() => {
     if (localStorage.getItem('tramwatchMicActive') === 'true') {
       startMic()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []) // intentionally runs once on mount only
+  }, [])
 
   // ── Merge DB + live mic points ────────────────────────────────────────────
   const points = useMemo(() => {
@@ -573,18 +534,30 @@ export function LiveChart() {
       for (const p of micPoints) {
         const ex = map.get(p.tsMs)
         if (ex) {
-          map.set(p.tsMs, {
-            ...ex,
-            ...(p.ext !== null ? { ext: p.ext } : {}),
-            ...(p.int !== null ? { int: p.int } : {}),
-          })
+          const merged: ChartPoint = { ...ex }
+          for (const [k, v] of Object.entries(p)) {
+            if (k !== 'tsMs' && v != null) merged[k] = v
+          }
+          map.set(p.tsMs, merged)
         } else {
-          map.set(p.tsMs, p)
+          map.set(p.tsMs, { ...p })
         }
       }
     }
     return Array.from(map.values()).sort((a, b) => a.tsMs - b.tsMs)
   }, [dbPoints, micPoints, micActive])
+
+  // Sorted list of all source names seen in the data (+ active mic source)
+  const knownSources = useMemo(() => {
+    const set = new Set<string>()
+    for (const p of points) {
+      for (const k of Object.keys(p)) {
+        if (k !== 'tsMs') set.add(k)
+      }
+    }
+    if (micActive) set.add(micSource)
+    return Array.from(set).sort()
+  }, [points, micActive, micSource])
 
   // ── Render ────────────────────────────────────────────────────────────────
   if (loading) return <Skeleton className="w-full h-72" />
@@ -622,16 +595,12 @@ export function LiveChart() {
               <span className="text-xs text-muted-foreground animate-pulse">Waiting for signal…</span>
             )
           )}
-          {/* Role badge — links to Settings so it's easy to change */}
           <Link
             href="/settings"
-            className={`text-[11px] px-1.5 py-0.5 rounded border transition-opacity hover:opacity-100 opacity-70 ${micSource === 'exterior'
-              ? 'border-amber-500/40 text-amber-400'
-              : 'border-blue-500/40 text-blue-400'}`}
-            title="Change role in Settings"
+            className="text-[11px] px-1.5 py-0.5 rounded border border-border/60 text-muted-foreground transition-opacity hover:opacity-100 opacity-70"
+            title="Change source name in Settings"
           >
-            {micSource === 'exterior' ? 'Ext' : 'Int'}
-            {deviceLabel ? ` · ${deviceLabel}` : ' · set label in Settings'}
+            {micSource}{deviceLabel ? ` · ${deviceLabel}` : ' · set label in Settings'}
           </Link>
         </div>
         <div className="flex items-center gap-2">
@@ -677,7 +646,7 @@ export function LiveChart() {
         </div>
       </div>
 
-      {/* Frequency spectrum — only visible when mic is active and bands are populated */}
+      {/* Frequency spectrum */}
       {micActive && bands.length === BANDS.length && (
         <div className="px-1 space-y-1">
           <div className="flex items-end gap-[3px] h-10">
@@ -691,8 +660,6 @@ export function LiveChart() {
               )
             })}
           </div>
-
-          {/* Band labels */}
           <div className="flex gap-[3px]">
             {BANDS.map((b, i) => (
               <span key={i} className="flex-1 text-center text-[8px] text-muted-foreground leading-none">
@@ -700,8 +667,6 @@ export function LiveChart() {
               </span>
             ))}
           </div>
-
-          {/* Per-mechanism scores + combined tram score */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[10px]" style={{ color: GROUP_COLOR.rolling }}>
               Roll {tramScore.rolling}%
@@ -735,7 +700,7 @@ export function LiveChart() {
         </div>
       )}
 
-      {/* Chart — only render when there is something to show */}
+      {/* Chart */}
       {(hasData || micActive) && (
         <ResponsiveContainer width="100%" height={340}>
           <ComposedChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
@@ -774,13 +739,9 @@ export function LiveChart() {
               }}
               labelStyle={{ color: 'hsl(213 31% 91%)' }}
               labelFormatter={ms => formatZurichTime(new Date(ms as number).toISOString(), 'time')}
-              formatter={(value: number, name: string) => [
-                `${value?.toFixed(1)} dB(A)`,
-                name === 'ext' ? 'Exterior' : 'Interior',
-              ]}
+              formatter={(value: number, name: string) => [`${value?.toFixed(1)} dB(A)`, name]}
             />
 
-            {/* ±20 s shaded band per tram */}
             {visibleTrams.map((dep, i) => (
               <ReferenceArea
                 key={`band-${dep.line}-${dep.expected}-${i}`}
@@ -792,7 +753,6 @@ export function LiveChart() {
               />
             ))}
 
-            {/* Exact departure line + label per tram */}
             {visibleTrams.map((dep, i) => (
               <ReferenceLine
                 key={`vline-${dep.line}-${dep.expected}-${i}`}
@@ -809,7 +769,6 @@ export function LiveChart() {
               />
             ))}
 
-            {/* Manual tram tags — detected passage band + anchor line at tag moment */}
             {manualTags.filter(t => t.endMs >= domainMin && t.startMs <= domainMax).map((t, i) => (
               <ReferenceArea
                 key={`tag-band-${t.tagMs}-${i}`}
@@ -831,7 +790,6 @@ export function LiveChart() {
               />
             ))}
 
-            {/* ES II noise limit */}
             <ReferenceLine
               y={limit}
               stroke="#ef4444"
@@ -840,7 +798,6 @@ export function LiveChart() {
               label={{ value: `ES II ${limit} dB`, position: 'insideTopRight', fill: '#ef4444', fontSize: 10 }}
             />
 
-            {/* Now marker */}
             <ReferenceLine
               x={nowMs}
               stroke="hsl(215 20% 40%)"
@@ -848,55 +805,47 @@ export function LiveChart() {
               strokeWidth={1}
             />
 
-            <Line
-              type="linear"
-              dataKey="ext"
-              name="ext"
-              stroke="#F59E0B"
-              strokeWidth={1.5}
-              dot={false}
-              isAnimationActive={false}
-              connectNulls={true}
-            />
-            <Line
-              type="linear"
-              dataKey="int"
-              name="int"
-              stroke="#60A5FA"
-              strokeWidth={1.5}
-              dot={false}
-              isAnimationActive={false}
-              connectNulls={true}
-            />
+            {knownSources.map((src, i) => (
+              <Line
+                key={src}
+                type="linear"
+                dataKey={src}
+                name={src}
+                stroke={SOURCE_COLORS[i % SOURCE_COLORS.length]}
+                strokeWidth={1.5}
+                dot={false}
+                isAnimationActive={false}
+                connectNulls={true}
+              />
+            ))}
           </ComposedChart>
         </ResponsiveContainer>
       )}
 
-      {/* Sync status — DB reading counts + age */}
+      {/* Sync status */}
       {(() => {
         const nowMs = Date.now()
         const fmtAge = (ms: number | null) => ms ? `${Math.round((nowMs - ms) / 1000)}s ago` : 'never'
         return (
           <div className="flex flex-wrap items-center gap-3 px-2 text-[10px]">
-            <span className={dbStatus.ext > 0 ? 'text-amber-400/80' : 'text-muted-foreground/40'}>
-              Ext DB: {dbStatus.ext} pts · last {fmtAge(dbStatus.lastExtMs)}
-            </span>
-            <span className={dbStatus.int > 0 ? 'text-blue-400/80' : 'text-muted-foreground/40'}>
-              Int DB: {dbStatus.int} pts · last {fmtAge(dbStatus.lastIntMs)}
-            </span>
+            {Object.entries(dbStatus).map(([src, { count, lastMs }], i) => (
+              <span key={src} style={{ color: count > 0 ? SOURCE_COLORS[knownSources.indexOf(src) % SOURCE_COLORS.length] + 'cc' : undefined }}
+                className={count > 0 ? '' : 'text-muted-foreground/40'}>
+                {src}: {count} pts · last {fmtAge(lastMs)}
+              </span>
+            ))}
           </div>
         )
       })()}
 
       {/* Legend */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-2 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-4 h-px bg-amber-400" /> Exterior
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-4 h-px bg-blue-400" />
-          Interior{micActive ? ' (mic)' : ''}
-        </span>
+        {knownSources.map((src, i) => (
+          <span key={src} className="flex items-center gap-1.5">
+            <span className="inline-block w-4 h-px" style={{ backgroundColor: SOURCE_COLORS[i % SOURCE_COLORS.length] }} />
+            {src}{micActive && src === micSource ? ' (mic)' : ''}
+          </span>
+        ))}
         {manualTags.length > 0 && (
           <span className="flex items-center gap-1.5">
             <span className="inline-block w-4 h-2 rounded-sm bg-amber-400/20 border border-amber-400/50" />

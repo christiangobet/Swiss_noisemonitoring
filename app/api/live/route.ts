@@ -6,34 +6,27 @@ import type { Reading } from '@/lib/db'
 
 export async function GET() {
   try {
-    const exteriorRows = await sql`
+    // Fetch last 3 min of readings for all sources in one query
+    const rows = await sql`
       SELECT id, ts, source, db_raw, db_cal, tram_flag, tram_line, tram_stop, tram_dir
       FROM readings
-      WHERE source = 'exterior'
-      ORDER BY ts DESC
-      LIMIT 120
-    `
-    const exterior = exteriorRows as unknown as Reading[]
+      WHERE ts >= NOW() - INTERVAL '3 minutes'
+      ORDER BY source, ts DESC
+    ` as unknown as (Reading & { source: string })[]
 
-    const interiorRows = await sql`
-      SELECT id, ts, source, db_raw, db_cal, tram_flag, tram_line, tram_stop, tram_dir
-      FROM readings
-      WHERE source = 'interior'
-      ORDER BY ts DESC
-      LIMIT 120
-    `
-    const interior = interiorRows as unknown as Reading[]
+    // Group by source, cap at 120 rows each, then reverse to ascending order
+    const bySource: Record<string, Reading[]> = {}
+    for (const r of rows) {
+      const src = r.source
+      if (!bySource[src]) bySource[src] = []
+      if (bySource[src].length < 120) bySource[src].push(r)
+    }
+    for (const src of Object.keys(bySource)) bySource[src].reverse()
 
-    // Return in ascending order (oldest first) for chart rendering
-    return NextResponse.json({
-      exterior: exterior.reverse(),
-      interior: interior.reverse(),
-      fetched_at: new Date().toISOString(),
-    })
+    return NextResponse.json({ sources: bySource, fetched_at: new Date().toISOString() })
   } catch (err: unknown) {
-    // Table doesn't exist yet — return empty (setup hasn't been run)
     if (err && typeof err === 'object' && 'code' in err && err.code === '42P01') {
-      return NextResponse.json({ exterior: [], interior: [], fetched_at: new Date().toISOString() })
+      return NextResponse.json({ sources: {}, fetched_at: new Date().toISOString() })
     }
     console.error('Live API error:', err)
     return NextResponse.json({ error: 'Database error', detail: String(err) }, { status: 503 })

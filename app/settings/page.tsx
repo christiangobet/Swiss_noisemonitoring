@@ -51,7 +51,7 @@ interface SensorStatus {
 
 export default function SettingsPage() {
   // ── This-device identity (localStorage) ─────────────────────────────────────
-  const [deviceSource, setDeviceSourceState] = useState<'interior' | 'exterior'>('interior')
+  const [deviceSource, setDeviceSourceState] = useState<string>('interior')
   const [deviceLabel,  setDeviceLabelState]  = useState('')
   const [deviceId,     setDeviceId]          = useState('')
 
@@ -65,13 +65,13 @@ export default function SettingsPage() {
     }
     setDeviceId(id)
     const src = localStorage.getItem('tramwatchSource')
-    if (src === 'exterior') setDeviceSourceState('exterior')
+    if (src) setDeviceSourceState(src)
     setDeviceLabelState(localStorage.getItem('tramwatchDeviceLabel') ?? '')
   }, [])
 
-  const handleDeviceSource = (s: 'interior' | 'exterior') => {
-    setDeviceSourceState(s)
-    localStorage.setItem('tramwatchSource', s)
+  const handleDeviceSource = (v: string) => {
+    setDeviceSourceState(v)
+    localStorage.setItem('tramwatchSource', v)
   }
   const handleDeviceLabel = (v: string) => {
     setDeviceLabelState(v)
@@ -321,31 +321,23 @@ export default function SettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Role toggle */}
+          {/* Source name */}
           <div className="space-y-1.5">
-            <p className="text-sm font-medium text-foreground">Role</p>
-            <div className="flex rounded-md overflow-hidden border border-border w-fit text-sm">
-              <button
-                className={`px-4 py-1.5 transition-colors ${deviceSource === 'interior'
-                  ? 'bg-blue-500/20 text-blue-400 font-medium'
-                  : 'text-muted-foreground hover:text-foreground'}`}
-                onClick={() => handleDeviceSource('interior')}
-              >
-                Interior
-              </button>
-              <button
-                className={`px-4 py-1.5 border-l border-border transition-colors ${deviceSource === 'exterior'
-                  ? 'bg-amber-500/20 text-amber-400 font-medium'
-                  : 'text-muted-foreground hover:text-foreground'}`}
-                onClick={() => handleDeviceSource('exterior')}
-              >
-                Exterior
-              </button>
-            </div>
+            <label htmlFor="device-source" className="text-sm font-medium text-foreground">
+              Source name
+            </label>
+            <Input
+              id="device-source"
+              value={deviceSource}
+              onChange={e => {
+                const v = e.target.value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32)
+                handleDeviceSource(v || 'interior')
+              }}
+              placeholder="e.g. interior, roof, iphone"
+              className="max-w-xs font-mono"
+            />
             <p className="text-xs text-muted-foreground">
-              {deviceSource === 'interior'
-                ? 'Readings will be saved as interior (e.g. laptop indoors).'
-                : 'Readings will be saved as exterior (e.g. iPhone outside).'}
+              A short name identifying where this device is placed. Each unique name appears as its own line on the live chart.
             </p>
           </div>
 

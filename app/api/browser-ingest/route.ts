@@ -34,8 +34,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'readings batch must not exceed 30 items' }, { status: 400 })
   }
 
-  // Normalise source — only allow known values
-  const source = body.source === 'exterior' ? 'exterior' : 'interior'
+  // Accept any valid source name (alphanumeric / dash / underscore, ≤32 chars)
+  const rawSource = typeof body.source === 'string' ? body.source.trim() : ''
+  const source = /^[a-zA-Z0-9_-]{1,32}$/.test(rawSource) ? rawSource : 'interior'
   const deviceId    = typeof body.device_id    === 'string' ? body.device_id.slice(0, 64)  : null
   const deviceLabel = typeof body.device_label === 'string' ? body.device_label.slice(0, 64) : null
 
@@ -57,7 +58,7 @@ export async function POST(req: NextRequest) {
     CREATE TABLE IF NOT EXISTS readings (
       id           BIGSERIAL PRIMARY KEY,
       ts           TIMESTAMPTZ NOT NULL,
-      source       TEXT NOT NULL CHECK (source IN ('exterior','interior')),
+      source       TEXT NOT NULL,
       db_raw       REAL NOT NULL,
       db_cal       REAL,
       tram_flag    BOOLEAN DEFAULT FALSE,
@@ -68,9 +69,11 @@ export async function POST(req: NextRequest) {
       device_label TEXT
     )
   `
-  // Add columns to existing tables created before this migration
+  // Migrations for existing tables
   await sql`ALTER TABLE readings ADD COLUMN IF NOT EXISTS device_id    TEXT`
   await sql`ALTER TABLE readings ADD COLUMN IF NOT EXISTS device_label TEXT`
+  // Drop the old binary-source check constraint so any source name is accepted
+  await sql`ALTER TABLE readings DROP CONSTRAINT IF EXISTS readings_source_check`
 
   await sql`
     CREATE TABLE IF NOT EXISTS calibrations (
