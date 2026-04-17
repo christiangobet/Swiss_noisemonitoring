@@ -62,7 +62,7 @@ const FUTURE_MS     = 2 * 60 * 1000  // 2 min future
 const TRAM_PAD_MS   = 20 * 1000      // ±20 s tram band
 const CHART_TICK_MS   = 250    // display refresh — smooth ECG
 const STORAGE_TICK_MS = 1000   // one sample/s written to DB (10× fewer writes)
-const MIC_FLUSH_MS    = 10000  // flush to DB every 10 s (10 readings/batch)
+const MIC_FLUSH_MS    = 5000   // flush to DB every 5 s (5 readings/batch)
 const DB_OFFSET       = 94     // dBFS → rough dBSPL
 
 // ── Frequency analysis ────────────────────────────────────────────────────────
@@ -214,6 +214,7 @@ export function LiveChart() {
   const [tramScore,  setTramScore] = useState<TramScore>({ score: 0, rolling: 0, squeal: 0, flange: 0 })
   const [manualTags, setManualTags] = useState<ManualTag[]>([])
   const [tagFlash,   setTagFlash]   = useState(false)
+  const [dbStatus,   setDbStatus]   = useState<{ ext: number; int: number }>({ ext: 0, int: 0 })
   const [, startTransition] = useTransition()
 
   // ── Device identity (localStorage-persisted) ──────────────────────────────
@@ -296,6 +297,7 @@ export function LiveChart() {
         ext:  extMap.get(ts) ?? null,
         int:  intMap.get(ts) ?? null,
       })))
+      setDbStatus({ ext: extMap.size, int: intMap.size })
       setLoading(false)
       setError(null)
     } catch (err) { setError(String(err)) }
@@ -333,13 +335,14 @@ export function LiveChart() {
     setTimeout(() => setTagFlash(false), 1500)
 
     // Flush every reading within the detected passage window as tram_flag=true
+    const isExt = micSourceRef.current === 'exterior'
     const passagePoints = micPointsRef.current.filter(
-      p => p.int !== null && p.tsMs >= startMs && p.tsMs <= endMs
+      p => (isExt ? p.ext : p.int) !== null && p.tsMs >= startMs && p.tsMs <= endMs
     )
     for (const p of passagePoints) {
       flushBuf.current.push({
         ts:        new Date(p.tsMs).toISOString(),
-        db_raw:    p.int as number,
+        db_raw:    (isExt ? p.ext : p.int) as number,
         tram_flag: true,
       })
     }
@@ -456,9 +459,13 @@ export function LiveChart() {
         if (tsMs - lastTickMs.current >= CHART_TICK_MS) {
           lastTickMs.current = tsMs
           if (db !== null) {
+            const isExt = micSourceRef.current === 'exterior'
             setMicPoints(prev => {
               const cutoff = tsMs - HISTORY_MS
-              return [...prev.filter(p => p.tsMs >= cutoff), { tsMs, ext: null, int: db }]
+              const pt: ChartPoint = isExt
+                ? { tsMs, ext: db, int: null }
+                : { tsMs, ext: null, int: db }
+              return [...prev.filter(p => p.tsMs >= cutoff), pt]
             })
           }
           // Frequency analysis with rolling ambient baseline
@@ -519,11 +526,26 @@ export function LiveChart() {
       }
       flushTimer.current = setInterval(doFlush, MIC_FLUSH_MS)
 
+      localStorage.setItem('tramwatchMicActive', 'true')
       setMicActive(true)
     } catch (e) {
       setMicError(e instanceof Error ? e.message : 'Microphone unavailable')
     }
   }, [])
+
+  // Stop explicitly (user clicked button) — clears the auto-restart flag
+  const handleStopClick = useCallback(() => {
+    localStorage.removeItem('tramwatchMicActive')
+    stopMic()
+  }, [stopMic])
+
+  // Auto-restart mic when navigating back to this page
+  useEffect(() => {
+    if (localStorage.getItem('tramwatchMicActive') === 'true') {
+      startMic()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // intentionally runs once on mount only
 
   // ── Merge DB + live mic points ────────────────────────────────────────────
   const points = useMemo(() => {
@@ -532,7 +554,15 @@ export function LiveChart() {
     if (micActive) {
       for (const p of micPoints) {
         const ex = map.get(p.tsMs)
-        map.set(p.tsMs, ex ? { ...ex, int: p.int } : p)
+        if (ex) {
+          map.set(p.tsMs, {
+            ...ex,
+            ...(p.ext !== null ? { ext: p.ext } : {}),
+            ...(p.int !== null ? { int: p.int } : {}),
+          })
+        } else {
+          map.set(p.tsMs, p)
+        }
       }
     }
     return Array.from(map.values()).sort((a, b) => a.tsMs - b.tsMs)
@@ -607,7 +637,7 @@ export function LiveChart() {
               size="sm"
               variant={micActive ? 'destructive' : 'outline'}
               className="h-7 px-2 text-xs gap-1"
-              onClick={micActive ? stopMic : startMic}
+              onClick={micActive ? handleStopClick : startMic}
             >
               {micActive ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
               {micActive ? 'Stop mic' : 'Use mic'}
@@ -808,6 +838,21 @@ export function LiveChart() {
           </ComposedChart>
         </ResponsiveContainer>
       )}
+
+      {/* Sync status — shows DB reading counts so multi-device sync is visible */}
+      <div className="flex items-center gap-3 px-2 text-[10px] text-muted-foreground/60">
+        <span className={dbStatus.ext > 0 ? 'text-amber-400/70' : ''}>
+          ↑ Ext {dbStatus.ext} pts
+        </span>
+        <span className={dbStatus.int > 0 ? 'text-blue-400/70' : ''}>
+          ↑ Int {dbStatus.int} pts
+        </span>
+        {(dbStatus.ext === 0 || dbStatus.int === 0) && (
+          <span className="text-muted-foreground/40">
+            — waiting for {[dbStatus.ext === 0 && 'exterior', dbStatus.int === 0 && 'interior'].filter(Boolean).join(' & ')} data
+          </span>
+        )}
+      </div>
 
       {/* Legend */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-2 text-xs text-muted-foreground">
