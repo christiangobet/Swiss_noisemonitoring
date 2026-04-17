@@ -211,8 +211,9 @@ export function LiveChart() {
   const [micActive,    setMicActive]    = useState(false)
   const [micDb,        setMicDb]        = useState<number | null>(null)
   const [micError,     setMicError]     = useState<string | null>(null)
-  const [micSaveError, setMicSaveError] = useState<string | null>(null)
-  const [lastSavedMs,  setLastSavedMs]  = useState<number | null>(null)
+  const [micSaveError,  setMicSaveError]  = useState<string | null>(null)
+  const [lastSavedMs,   setLastSavedMs]   = useState<number | null>(null)
+  const [savedCount,    setSavedCount]    = useState(0)
   const [bands,      setBands]     = useState<number[]>([])
   const [tramScore,  setTramScore] = useState<TramScore>({ score: 0, rolling: 0, squeal: 0, flange: 0 })
   const [manualTags, setManualTags] = useState<ManualTag[]>([])
@@ -406,6 +407,8 @@ export function LiveChart() {
     setMicDb(null)
     setMicPoints([])
     setMicSaveError(null)
+    setLastSavedMs(null)
+    setSavedCount(0)
     setBands([])
     setTramScore({ score: 0, rolling: 0, squeal: 0, flange: 0 })
     bandHistoryRef.current = []
@@ -530,6 +533,7 @@ export function LiveChart() {
           if (res.ok) {
             setMicSaveError(null)
             setLastSavedMs(Date.now())
+            setSavedCount(n => n + batch.length)
           } else {
             const err = await res.json().catch(() => ({}))
             setMicSaveError(`Save error ${res.status}: ${(err as {error?: string}).error ?? 'unknown'}`)
@@ -662,10 +666,12 @@ export function LiveChart() {
             {micSaveError && (
               <span className="text-xs text-orange-400 max-w-[200px] text-right font-medium">⚠ {micSaveError}</span>
             )}
-            {micActive && !micSaveError && lastSavedMs && (
-              <span className="text-[10px] text-green-500/70 text-right">
-                saved {Math.round((Date.now() - lastSavedMs) / 1000)}s ago
+            {micActive && !micSaveError && lastSavedMs ? (
+              <span className="text-[10px] text-green-500/80 text-right">
+                ✓ {savedCount} saved · {micSource} · {Math.round((Date.now() - lastSavedMs) / 1000)}s ago
               </span>
+            ) : micActive && !micSaveError && (
+              <span className="text-[10px] text-muted-foreground/60 text-right">waiting for first flush…</span>
             )}
           </div>
         </div>
