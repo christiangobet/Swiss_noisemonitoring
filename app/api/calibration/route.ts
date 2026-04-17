@@ -2,56 +2,74 @@ export const dynamic = 'force-dynamic'
 
 import { NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
-import type { Calibration } from '@/lib/db'
 
 export async function GET() {
   try {
-    const activeRows = await sql`
-      SELECT id, created_at, duration_sec, ext_mean_db, int_mean_db, offset_db, active, notes
-      FROM calibrations
-      WHERE active = TRUE
-      ORDER BY created_at DESC
-      LIMIT 1
+    // Ensure tables exist
+    await sql`
+      CREATE TABLE IF NOT EXISTS calib_sessions (
+        id           BIGSERIAL PRIMARY KEY,
+        started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ends_at      TIMESTAMPTZ NOT NULL,
+        duration_sec INT NOT NULL,
+        ref_source   TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        notes        TEXT
+      )
     `
-    const active = activeRows as unknown as Calibration[]
+    await sql`
+      CREATE TABLE IF NOT EXISTS device_calibrations (
+        id           BIGSERIAL PRIMARY KEY,
+        session_id   BIGINT,
+        source       TEXT NOT NULL,
+        mean_db      REAL NOT NULL,
+        offset_db    REAL NOT NULL DEFAULT 0,
+        sample_count INT NOT NULL DEFAULT 0,
+        active       BOOLEAN DEFAULT TRUE,
+        created_at   TIMESTAMPTZ DEFAULT NOW()
+      )
+    `
 
-    const historyRows = await sql`
-      SELECT id, created_at, duration_sec, ext_mean_db, int_mean_db, offset_db, active, notes
-      FROM calibrations
-      ORDER BY created_at DESC
+    // Active offset per source
+    const offsetRows = await sql`
+      SELECT DISTINCT ON (source)
+        source, offset_db, created_at, session_id
+      FROM device_calibrations
+      WHERE active = TRUE
+      ORDER BY source, created_at DESC
+    `
+
+    // Recent sessions with their per-source results
+    const sessionRows = await sql`
+      SELECT
+        s.id, s.started_at, s.duration_sec, s.ref_source, s.status, s.notes,
+        json_agg(json_build_object(
+          'source', dc.source,
+          'mean_db', dc.mean_db,
+          'offset_db', dc.offset_db,
+          'sample_count', dc.sample_count,
+          'active', dc.active
+        ) ORDER BY dc.source) AS sources
+      FROM calib_sessions s
+      LEFT JOIN device_calibrations dc ON dc.session_id = s.id
+      WHERE s.status = 'done'
+      GROUP BY s.id
+      ORDER BY s.started_at DESC
       LIMIT 10
     `
-    const history = historyRows as unknown as Calibration[]
 
-    // Sensor last-seen
-    const lastSeenExt = await sql`
-      SELECT ts FROM readings WHERE source = 'exterior' ORDER BY ts DESC LIMIT 1
+    // Active sources (recorded within last 30 s)
+    const activeSourceRows = await sql`
+      SELECT DISTINCT ON (source) source, ts
+      FROM readings
+      WHERE ts >= NOW() - INTERVAL '30 seconds'
+      ORDER BY source, ts DESC
     `
-    const lastSeenInt = await sql`
-      SELECT ts FROM readings WHERE source = 'interior' ORDER BY ts DESC LIMIT 1
-    `
-
-    const now = Date.now()
-    const extTs = lastSeenExt[0]?.ts ? new Date(lastSeenExt[0].ts as string).getTime() : null
-    const intTs = lastSeenInt[0]?.ts ? new Date(lastSeenInt[0].ts as string).getTime() : null
-
-    // Online = last reading within 30 seconds
-    const extOnline = extTs ? now - extTs < 30000 : false
-    const intOnline = intTs ? now - intTs < 30000 : false
 
     return NextResponse.json({
-      active: active[0] ?? null,
-      history,
-      sensors: {
-        exterior: {
-          online: extOnline,
-          last_seen: lastSeenExt[0]?.ts ?? null,
-        },
-        interior: {
-          online: intOnline,
-          last_seen: lastSeenInt[0]?.ts ?? null,
-        },
-      },
+      active_offsets: offsetRows,
+      sessions: sessionRows,
+      active_sources: activeSourceRows.map(r => r.source as string),
     })
   } catch (err) {
     console.error('Calibration GET error:', err)

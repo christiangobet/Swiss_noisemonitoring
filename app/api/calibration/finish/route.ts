@@ -22,103 +22,72 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'session_id must be a number' }, { status: 400 })
   }
 
-  // Fetch the pending calibration session
-  const pending = await sql`
-    SELECT id, created_at, duration_sec, notes
-    FROM calibrations
-    WHERE id = ${session_id} AND active = FALSE AND notes LIKE 'PENDING:%'
+  const sessionRows = await sql`
+    SELECT id, started_at, ends_at, ref_source
+    FROM calib_sessions
+    WHERE id = ${session_id} AND status = 'running'
   `
-  if (pending.length === 0) {
+  if (sessionRows.length === 0) {
     return NextResponse.json({ error: 'Session not found or already finished' }, { status: 404 })
   }
 
-  const session = pending[0]
-  const startedAt = session.created_at as string
-  const durationSec = session.duration_sec as number
-  const endsAt = new Date(new Date(startedAt).getTime() + durationSec * 1000).toISOString()
+  const { started_at: startedAt, ends_at: endsAt, ref_source: refSource } = sessionRows[0] as {
+    started_at: string; ends_at: string; ref_source: string
+  }
 
-  // Fetch readings from both sources in the session window
-  const extReadings = await sql`
-    SELECT db_cal FROM readings
-    WHERE source = 'exterior'
-      AND ts >= ${startedAt}
-      AND ts <= ${endsAt}
-      AND db_cal IS NOT NULL
-    ORDER BY ts
+  // Discover all sources that recorded in the window
+  const sourceRows = await sql`
+    SELECT DISTINCT source FROM readings
+    WHERE ts >= ${startedAt} AND ts <= ${endsAt} AND db_raw IS NOT NULL
   `
-  const intReadings = await sql`
-    SELECT db_cal FROM readings
-    WHERE source = 'interior'
-      AND ts >= ${startedAt}
-      AND ts <= ${endsAt}
-      AND db_cal IS NOT NULL
-    ORDER BY ts
-  `
+  const sources = sourceRows.map(r => r.source as string)
 
-  if (extReadings.length === 0) {
+  if (!sources.includes(refSource as string)) {
     return NextResponse.json(
-      { error: 'No exterior readings found in calibration window. Is the exterior sensor online?' },
+      { error: `Reference source "${refSource}" has no readings in the session window.` },
       { status: 422 }
     )
   }
-  if (intReadings.length === 0) {
+  if (sources.length < 2) {
     return NextResponse.json(
-      { error: 'No interior readings found in calibration window. Is the interior sensor online?' },
+      { error: 'Fewer than 2 sources recorded during the session window.' },
       { status: 422 }
     )
   }
 
-  const extValues = extReadings.map(r => r.db_cal as number)
-  const intValues = intReadings.map(r => r.db_cal as number)
+  // Compute Leq mean per source
+  const sourceMeans: Record<string, { mean: number; count: number }> = {}
+  for (const src of sources) {
+    const rows = await sql`
+      SELECT db_raw FROM readings
+      WHERE source = ${src} AND ts >= ${startedAt} AND ts <= ${endsAt} AND db_raw IS NOT NULL
+      ORDER BY ts
+    `
+    const values = rows.map(r => r.db_raw as number)
+    const mean = computeLeq(values) ?? values.reduce((a, b) => a + b, 0) / values.length
+    sourceMeans[src] = { mean, count: values.length }
+  }
 
-  const extMean = computeLeq(extValues) ?? (extValues.reduce((a, b) => a + b, 0) / extValues.length)
-  const intMean = computeLeq(intValues) ?? (intValues.reduce((a, b) => a + b, 0) / intValues.length)
-  const offsetDb = extMean - intMean
+  const refMean = sourceMeans[refSource as string].mean
 
-  // Deactivate all previous active calibrations
-  await sql`UPDATE calibrations SET active = FALSE WHERE active = TRUE`
+  // Deactivate all existing calibrations
+  await sql`UPDATE device_calibrations SET active = FALSE`
 
-  // Update the pending session to become the active calibration
-  await sql`
-    UPDATE calibrations
-    SET
-      active = TRUE,
-      ext_mean_db = ${extMean},
-      int_mean_db = intMean,
-      offset_db = ${offsetDb},
-      notes = ${notes ?? null}
-    WHERE id = ${session_id}
-  `
-
-  // Fix typo: use parameter correctly
-  await sql`
-    UPDATE calibrations
-    SET int_mean_db = ${intMean}
-    WHERE id = ${session_id}
-  `
-
-  // Retroactively apply offset to all interior readings since last calibration
-  // (readings since the previous active calibration was created)
-  const prevCalib = await sql`
-    SELECT created_at FROM calibrations
-    WHERE active = FALSE AND notes NOT LIKE 'PENDING:%'
-    ORDER BY created_at DESC
-    LIMIT 1
-  `
-  const retroFrom = prevCalib[0]?.created_at ?? '2000-01-01T00:00:00Z'
+  // Insert per-source rows and retroactively update readings
+  const results: Array<{ source: string; mean_db: number; offset_db: number; sample_count: number }> = []
+  for (const [src, { mean, count }] of Object.entries(sourceMeans)) {
+    const offsetDb = refMean - mean
+    await sql`
+      INSERT INTO device_calibrations (session_id, source, mean_db, offset_db, sample_count, active)
+      VALUES (${session_id}, ${src}, ${mean}, ${offsetDb}, ${count}, TRUE)
+    `
+    await sql`UPDATE readings SET db_cal = db_raw + ${offsetDb} WHERE source = ${src}`
+    results.push({ source: src, mean_db: mean, offset_db: offsetDb, sample_count: count })
+  }
 
   await sql`
-    UPDATE readings
-    SET db_cal = db_raw + ${offsetDb}
-    WHERE source = 'interior'
-      AND ts >= ${retroFrom as string}
+    UPDATE calib_sessions SET status = 'done', notes = ${notes ?? null} WHERE id = ${session_id}
   `
 
-  return NextResponse.json({
-    offset_db: offsetDb,
-    ext_mean_db: extMean,
-    int_mean_db: intMean,
-    sample_count: Math.min(extReadings.length, intReadings.length),
-    session_id,
-  })
+  return NextResponse.json({ session_id, ref_source: refSource, sources: results })
 }

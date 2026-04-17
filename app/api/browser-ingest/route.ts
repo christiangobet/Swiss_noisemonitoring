@@ -76,22 +76,24 @@ export async function POST(req: NextRequest) {
   await sql`ALTER TABLE readings DROP CONSTRAINT IF EXISTS readings_source_check`
 
   await sql`
-    CREATE TABLE IF NOT EXISTS calibrations (
-      id           SERIAL PRIMARY KEY,
-      created_at   TIMESTAMPTZ DEFAULT NOW(),
-      duration_sec INT NOT NULL,
-      ext_mean_db  REAL NOT NULL,
-      int_mean_db  REAL NOT NULL,
-      offset_db    REAL NOT NULL,
+    CREATE TABLE IF NOT EXISTS device_calibrations (
+      id           BIGSERIAL PRIMARY KEY,
+      session_id   BIGINT,
+      source       TEXT NOT NULL,
+      mean_db      REAL NOT NULL,
+      offset_db    REAL NOT NULL DEFAULT 0,
+      sample_count INT NOT NULL DEFAULT 0,
       active       BOOLEAN DEFAULT TRUE,
-      notes        TEXT
+      created_at   TIMESTAMPTZ DEFAULT NOW()
     )
   `
 
   let offsetDb = 0
   try {
     const calibRows = await sql`
-      SELECT offset_db FROM calibrations WHERE active = TRUE ORDER BY created_at DESC LIMIT 1
+      SELECT offset_db FROM device_calibrations
+      WHERE source = ${source} AND active = TRUE
+      ORDER BY created_at DESC LIMIT 1
     `
     if (calibRows.length > 0) offsetDb = calibRows[0].offset_db as number
   } catch { /* non-fatal */ }
