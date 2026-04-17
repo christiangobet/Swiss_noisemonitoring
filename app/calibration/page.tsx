@@ -9,6 +9,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { formatZurichTime } from '@/lib/utils'
 import { CheckCircle2, AlertCircle, Clock, RotateCcw } from 'lucide-react'
 import { toast } from '@/hooks/use-toast'
+import { MicRecorder } from '@/components/calibration/mic-recorder'
 
 interface ActiveOffset {
   source: string
@@ -215,7 +216,10 @@ export default function CalibrationPage() {
 
   return (
     <div className="p-4 space-y-4">
-      <h1 className="text-lg font-semibold text-foreground">Calibration</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold text-foreground">Calibration</h1>
+        <MicRecorder />
+      </div>
 
       {/* Active offsets */}
       <Card>
