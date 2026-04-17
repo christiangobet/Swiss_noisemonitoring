@@ -9,7 +9,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Skeleton } from '@/components/ui/skeleton'
 import { NOISE_LIMITS } from '@/lib/db'
 import { formatZurichTime } from '@/lib/utils'
-import { Search, RefreshCw, CheckCircle2, AlertCircle, Save, MapPin, ChevronDown, ChevronUp } from 'lucide-react'
+import { Search, RefreshCw, CheckCircle2, AlertCircle, Save, MapPin, ChevronDown, ChevronUp, Smartphone } from 'lucide-react'
 import { toast } from '@/hooks/use-toast'
 import { BrowserMicCard } from '@/components/settings/browser-mic'
 
@@ -50,6 +50,34 @@ interface SensorStatus {
 }
 
 export default function SettingsPage() {
+  // ── This-device identity (localStorage) ─────────────────────────────────────
+  const [deviceSource, setDeviceSourceState] = useState<'interior' | 'exterior'>('interior')
+  const [deviceLabel,  setDeviceLabelState]  = useState('')
+  const [deviceId,     setDeviceId]          = useState('')
+
+  useEffect(() => {
+    let id = localStorage.getItem('tramwatchDeviceId')
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2) + Date.now().toString(36)
+      localStorage.setItem('tramwatchDeviceId', id)
+    }
+    setDeviceId(id)
+    const src = localStorage.getItem('tramwatchSource')
+    if (src === 'exterior') setDeviceSourceState('exterior')
+    setDeviceLabelState(localStorage.getItem('tramwatchDeviceLabel') ?? '')
+  }, [])
+
+  const handleDeviceSource = (s: 'interior' | 'exterior') => {
+    setDeviceSourceState(s)
+    localStorage.setItem('tramwatchSource', s)
+  }
+  const handleDeviceLabel = (v: string) => {
+    setDeviceLabelState(v)
+    localStorage.setItem('tramwatchDeviceLabel', v)
+  }
+
   // ── Active / monitored state ────────────────────────────────────────────────
   const [monitoredStop, setMonitoredStop] = useState<string | null>(null)
   const [activeGroups, setActiveGroups] = useState<StopResult[]>([])
@@ -279,6 +307,74 @@ export default function SettingsPage() {
   return (
     <div className="p-4 space-y-4">
       <h1 className="text-lg font-semibold text-foreground">Settings</h1>
+
+      {/* ── This Device ─────────────────────────────────────────────────────── */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Smartphone className="h-4 w-4 text-muted-foreground" />
+            This Device
+          </CardTitle>
+          <CardDescription>
+            Role and label for this browser / device. Each device that records mic data
+            should have its own role and a recognisable name.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Role toggle */}
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium text-foreground">Role</p>
+            <div className="flex rounded-md overflow-hidden border border-border w-fit text-sm">
+              <button
+                className={`px-4 py-1.5 transition-colors ${deviceSource === 'interior'
+                  ? 'bg-blue-500/20 text-blue-400 font-medium'
+                  : 'text-muted-foreground hover:text-foreground'}`}
+                onClick={() => handleDeviceSource('interior')}
+              >
+                Interior
+              </button>
+              <button
+                className={`px-4 py-1.5 border-l border-border transition-colors ${deviceSource === 'exterior'
+                  ? 'bg-amber-500/20 text-amber-400 font-medium'
+                  : 'text-muted-foreground hover:text-foreground'}`}
+                onClick={() => handleDeviceSource('exterior')}
+              >
+                Exterior
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {deviceSource === 'interior'
+                ? 'Readings will be saved as interior (e.g. laptop indoors).'
+                : 'Readings will be saved as exterior (e.g. iPhone outside).'}
+            </p>
+          </div>
+
+          {/* Label */}
+          <div className="space-y-1.5">
+            <label htmlFor="device-label" className="text-sm font-medium text-foreground">
+              Device label
+            </label>
+            <Input
+              id="device-label"
+              value={deviceLabel}
+              onChange={e => handleDeviceLabel(e.target.value)}
+              placeholder="e.g. iPhone 15, MacBook, Raspberry Pi"
+              className="max-w-xs"
+            />
+            <p className="text-xs text-muted-foreground">
+              Stored with every reading so you can filter by device in future views.
+            </p>
+          </div>
+
+          {/* Device ID (informational) */}
+          {deviceId && (
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">Device ID (auto-generated, stable per browser)</p>
+              <p className="text-[11px] font-mono text-muted-foreground/60 break-all">{deviceId}</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* ── Monitoring Location ──────────────────────────────────────────────── */}
       <Card>

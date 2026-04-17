@@ -559,31 +559,6 @@ export function LiveChart() {
   return (
     <div className="w-full space-y-2">
 
-      {/* Device identity row */}
-      <div className="flex items-center gap-2 px-1 flex-wrap">
-        <span className="text-[11px] text-muted-foreground shrink-0">This device:</span>
-        <div className="flex rounded overflow-hidden border border-border/60 text-[11px] shrink-0">
-          <button
-            className={`px-2 py-0.5 transition-colors ${micSource === 'interior' ? 'bg-blue-500/20 text-blue-400' : 'text-muted-foreground hover:text-foreground'}`}
-            onClick={() => setMicSource('interior')}
-            disabled={micActive}
-          >Interior</button>
-          <button
-            className={`px-2 py-0.5 border-l border-border/60 transition-colors ${micSource === 'exterior' ? 'bg-amber-500/20 text-amber-400' : 'text-muted-foreground hover:text-foreground'}`}
-            onClick={() => setMicSource('exterior')}
-            disabled={micActive}
-          >Exterior</button>
-        </div>
-        <input
-          type="text"
-          value={deviceLabel}
-          onChange={e => setDeviceLabel(e.target.value)}
-          placeholder="label (e.g. iPhone, MacBook)"
-          disabled={micActive}
-          className="flex-1 min-w-0 max-w-[200px] text-[11px] bg-transparent border border-border/60 rounded px-2 py-0.5 text-foreground placeholder:text-muted-foreground/50 disabled:opacity-50 focus:outline-none focus:border-border"
-        />
-      </div>
-
       {/* Mic toggle row */}
       <div className="flex items-center justify-between px-1">
         <div className="flex items-center gap-3 min-h-[2rem]">
@@ -599,6 +574,15 @@ export function LiveChart() {
               <span className="text-xs text-muted-foreground animate-pulse">Waiting for signal…</span>
             )
           )}
+          {/* Read-only device identity badge — always visible, edit in Settings */}
+          <span
+            className={`text-[11px] px-1.5 py-0.5 rounded border ${micSource === 'exterior'
+              ? 'border-amber-500/40 text-amber-400/80'
+              : 'border-blue-500/40 text-blue-400/80'}`}
+          >
+            {micSource === 'exterior' ? 'Ext' : 'Int'}
+            {deviceLabel ? ` · ${deviceLabel}` : ''}
+          </span>
         </div>
         <div className="flex items-center gap-2">
           {micActive && (
