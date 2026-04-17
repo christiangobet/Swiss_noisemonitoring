@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef, useMemo, useTransition } from 'react'
+import Link from 'next/link'
 import {
   ComposedChart,
   Line,
@@ -617,15 +618,17 @@ export function LiveChart() {
               <span className="text-xs text-muted-foreground animate-pulse">Waiting for signal…</span>
             )
           )}
-          {/* Read-only device identity badge — always visible, edit in Settings */}
-          <span
-            className={`text-[11px] px-1.5 py-0.5 rounded border ${micSource === 'exterior'
-              ? 'border-amber-500/40 text-amber-400/80'
-              : 'border-blue-500/40 text-blue-400/80'}`}
+          {/* Role badge — links to Settings so it's easy to change */}
+          <Link
+            href="/settings"
+            className={`text-[11px] px-1.5 py-0.5 rounded border transition-opacity hover:opacity-100 opacity-70 ${micSource === 'exterior'
+              ? 'border-amber-500/40 text-amber-400'
+              : 'border-blue-500/40 text-blue-400'}`}
+            title="Change role in Settings"
           >
             {micSource === 'exterior' ? 'Ext' : 'Int'}
-            {deviceLabel ? ` · ${deviceLabel}` : ''}
-          </span>
+            {deviceLabel ? ` · ${deviceLabel}` : ' · set label in Settings'}
+          </Link>
         </div>
         <div className="flex items-center gap-2">
           {micActive && (
@@ -859,18 +862,24 @@ export function LiveChart() {
         </ResponsiveContainer>
       )}
 
-      {/* Sync status — DB reading counts + age, one line per source */}
+      {/* Sync status — DB reading counts + age; warns when both devices use the same source */}
       {(() => {
         const nowMs = Date.now()
         const fmtAge = (ms: number | null) => ms ? `${Math.round((nowMs - ms) / 1000)}s ago` : 'never'
+        const bothSameSource = micActive && dbStatus.int > 0 && dbStatus.ext === 0
         return (
-          <div className="flex items-center gap-4 px-2 text-[10px]">
+          <div className="flex flex-wrap items-center gap-3 px-2 text-[10px]">
             <span className={dbStatus.ext > 0 ? 'text-amber-400/80' : 'text-muted-foreground/40'}>
               Ext DB: {dbStatus.ext} pts · last {fmtAge(dbStatus.lastExtMs)}
             </span>
             <span className={dbStatus.int > 0 ? 'text-blue-400/80' : 'text-muted-foreground/40'}>
               Int DB: {dbStatus.int} pts · last {fmtAge(dbStatus.lastIntMs)}
             </span>
+            {bothSameSource && (
+              <Link href="/settings" className="text-orange-400 font-medium hover:underline">
+                ⚠ Both devices on Interior — set one to Exterior in Settings
+              </Link>
+            )}
           </div>
         )
       })()}
