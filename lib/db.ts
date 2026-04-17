@@ -22,15 +22,17 @@ export function createPool() {
 // Schema migration SQL — all tables created idempotently
 export const MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS readings (
-  id          BIGSERIAL PRIMARY KEY,
-  ts          TIMESTAMPTZ NOT NULL,
-  source      TEXT NOT NULL CHECK (source IN ('exterior','interior')),
-  db_raw      REAL NOT NULL,
-  db_cal      REAL,
-  tram_flag   BOOLEAN DEFAULT FALSE,
-  tram_line   TEXT,
-  tram_stop   TEXT,
-  tram_dir    TEXT
+  id           BIGSERIAL PRIMARY KEY,
+  ts           TIMESTAMPTZ NOT NULL,
+  source       TEXT NOT NULL CHECK (source IN ('exterior','interior')),
+  db_raw       REAL NOT NULL,
+  db_cal       REAL,
+  tram_flag    BOOLEAN DEFAULT FALSE,
+  tram_line    TEXT,
+  tram_stop    TEXT,
+  tram_dir     TEXT,
+  device_id    TEXT,
+  device_label TEXT
 );
 
 CREATE INDEX IF NOT EXISTS readings_ts_idx ON readings (ts DESC);
@@ -91,6 +93,8 @@ export interface Reading {
   tram_line: string | null
   tram_stop: string | null
   tram_dir: string | null
+  device_id: string | null
+  device_label: string | null
 }
 
 export interface LeqMinute {

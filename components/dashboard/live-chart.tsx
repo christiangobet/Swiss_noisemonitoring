@@ -216,6 +216,44 @@ export function LiveChart() {
   const [tagFlash,   setTagFlash]   = useState(false)
   const [, startTransition] = useTransition()
 
+  // ── Device identity (localStorage-persisted) ──────────────────────────────
+  const [micSource,    setMicSourceState]    = useState<'interior' | 'exterior'>('interior')
+  const [deviceLabel,  setDeviceLabelState]  = useState('')
+  const micSourceRef   = useRef<'interior' | 'exterior'>('interior')
+  const deviceLabelRef = useRef<string>('')
+  const deviceIdRef    = useRef<string>('')
+
+  const setMicSource = useCallback((s: 'interior' | 'exterior') => {
+    micSourceRef.current = s
+    setMicSourceState(s)
+    localStorage.setItem('tramwatchSource', s)
+  }, [])
+
+  const setDeviceLabel = useCallback((v: string) => {
+    deviceLabelRef.current = v
+    setDeviceLabelState(v)
+    localStorage.setItem('tramwatchDeviceLabel', v)
+  }, [])
+
+  // Load / generate device identity from localStorage on mount
+  useEffect(() => {
+    let id = localStorage.getItem('tramwatchDeviceId')
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2) + Date.now().toString(36)
+      localStorage.setItem('tramwatchDeviceId', id)
+    }
+    deviceIdRef.current = id
+
+    const src = localStorage.getItem('tramwatchSource')
+    if (src === 'exterior') { micSourceRef.current = 'exterior'; setMicSourceState('exterior') }
+
+    const label = localStorage.getItem('tramwatchDeviceLabel') ?? ''
+    deviceLabelRef.current = label
+    setDeviceLabelState(label)
+  }, [])
+
   const streamRef      = useRef<MediaStream | null>(null)
   const ctxRef         = useRef<AudioContext | null>(null)
   const analyserRef    = useRef<AnalyserNode | null>(null)
@@ -337,7 +375,12 @@ export function LiveChart() {
       fetch('/api/browser-ingest', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ readings: remaining.slice(i, i + 30) }),
+        body:    JSON.stringify({
+          source:       micSourceRef.current,
+          device_id:    deviceIdRef.current,
+          device_label: deviceLabelRef.current || undefined,
+          readings:     remaining.slice(i, i + 30),
+        }),
       }).catch(() => {})
     }
     flushBuf.current  = []
@@ -457,7 +500,12 @@ export function LiveChart() {
           const res = await fetch('/api/browser-ingest', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ readings: batch }),
+            body:    JSON.stringify({
+              source:       micSourceRef.current,
+              device_id:    deviceIdRef.current,
+              device_label: deviceLabelRef.current || undefined,
+              readings:     batch,
+            }),
           })
           if (res.ok) {
             setMicSaveError(null)
@@ -510,6 +558,31 @@ export function LiveChart() {
 
   return (
     <div className="w-full space-y-2">
+
+      {/* Device identity row */}
+      <div className="flex items-center gap-2 px-1 flex-wrap">
+        <span className="text-[11px] text-muted-foreground shrink-0">This device:</span>
+        <div className="flex rounded overflow-hidden border border-border/60 text-[11px] shrink-0">
+          <button
+            className={`px-2 py-0.5 transition-colors ${micSource === 'interior' ? 'bg-blue-500/20 text-blue-400' : 'text-muted-foreground hover:text-foreground'}`}
+            onClick={() => setMicSource('interior')}
+            disabled={micActive}
+          >Interior</button>
+          <button
+            className={`px-2 py-0.5 border-l border-border/60 transition-colors ${micSource === 'exterior' ? 'bg-amber-500/20 text-amber-400' : 'text-muted-foreground hover:text-foreground'}`}
+            onClick={() => setMicSource('exterior')}
+            disabled={micActive}
+          >Exterior</button>
+        </div>
+        <input
+          type="text"
+          value={deviceLabel}
+          onChange={e => setDeviceLabel(e.target.value)}
+          placeholder="label (e.g. iPhone, MacBook)"
+          disabled={micActive}
+          className="flex-1 min-w-0 max-w-[200px] text-[11px] bg-transparent border border-border/60 rounded px-2 py-0.5 text-foreground placeholder:text-muted-foreground/50 disabled:opacity-50 focus:outline-none focus:border-border"
+        />
+      </div>
 
       {/* Mic toggle row */}
       <div className="flex items-center justify-between px-1">
