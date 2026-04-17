@@ -856,7 +856,7 @@ export function LiveChart() {
               strokeWidth={1.5}
               dot={false}
               isAnimationActive={false}
-              connectNulls={false}
+              connectNulls={true}
             />
             <Line
               type="linear"
@@ -866,7 +866,7 @@ export function LiveChart() {
               strokeWidth={1.5}
               dot={false}
               isAnimationActive={false}
-              connectNulls={false}
+              connectNulls={true}
             />
           </ComposedChart>
         </ResponsiveContainer>
