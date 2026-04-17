@@ -753,8 +753,12 @@ export function LiveChart() {
               axisLine={false}
             />
             <YAxis
-              domain={[30, 95]}
-              ticks={[30, 40, 50, 60, 70, 80, 90]}
+              domain={([dataMin, dataMax]: [number, number]) => {
+                const lo = Math.floor(Math.min(dataMin, limit - 5) / 10) * 10
+                const hi = Math.ceil(Math.max(dataMax, limit + 5) / 10) * 10
+                return [Math.min(lo, 0), Math.max(hi, 50)]
+              }}
+              tickCount={7}
               tick={{ fill: 'hsl(215 20% 45%)', fontSize: 10 }}
               tickLine={false}
               axisLine={false}
