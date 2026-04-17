@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
 
 interface ReactivateBody {
-  calibration_id: number
+  session_id: number
 }
 
 export async function POST(req: NextRequest) {
@@ -15,31 +15,37 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { calibration_id } = body
-  if (!calibration_id || typeof calibration_id !== 'number') {
-    return NextResponse.json({ error: 'calibration_id must be a number' }, { status: 400 })
+  const { session_id } = body
+  if (!session_id || typeof session_id !== 'number') {
+    return NextResponse.json({ error: 'session_id must be a number' }, { status: 400 })
   }
 
-  // Verify it exists and is a completed (non-pending) calibration
-  const existing = await sql`
-    SELECT id, offset_db FROM calibrations
-    WHERE id = ${calibration_id}
-      AND (notes IS NULL OR notes NOT LIKE 'PENDING:%')
+  const sessionRows = await sql`
+    SELECT id FROM calib_sessions WHERE id = ${session_id} AND status = 'done'
   `
-  if (existing.length === 0) {
-    return NextResponse.json({ error: 'Calibration not found' }, { status: 404 })
+  if (sessionRows.length === 0) {
+    return NextResponse.json({ error: 'Session not found or not completed' }, { status: 404 })
   }
 
-  const offsetDb = existing[0].offset_db as number
-
-  // Deactivate all, then activate the chosen one
-  await sql`UPDATE calibrations SET active = FALSE`
-  await sql`UPDATE calibrations SET active = TRUE WHERE id = ${calibration_id}`
-
-  // Re-apply this offset to all interior readings
-  await sql`
-    UPDATE readings SET db_cal = db_raw + ${offsetDb} WHERE source = 'interior'
+  const calibRows = await sql`
+    SELECT source, offset_db FROM device_calibrations WHERE session_id = ${session_id}
   `
+  if (calibRows.length === 0) {
+    return NextResponse.json({ error: 'No calibrations found for this session' }, { status: 404 })
+  }
 
-  return NextResponse.json({ success: true, calibration_id, offset_db: offsetDb })
+  await sql`UPDATE device_calibrations SET active = FALSE`
+  await sql`UPDATE device_calibrations SET active = TRUE WHERE session_id = ${session_id}`
+
+  for (const row of calibRows) {
+    const src = row.source as string
+    const offsetDb = row.offset_db as number
+    await sql`UPDATE readings SET db_cal = db_raw + ${offsetDb} WHERE source = ${src}`
+  }
+
+  return NextResponse.json({
+    success: true,
+    session_id,
+    sources: calibRows.map(r => ({ source: r.source, offset_db: r.offset_db })),
+  })
 }

@@ -3,8 +3,19 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
 
+interface StopData {
+  stop_id: string
+  stop_name: string
+  line: string
+  headsign: string | null
+  monitored_lines?: string | null
+}
+
 interface SaveBody {
-  stops: string[]  // array of stop_ids to mark active; all others deactivated
+  /** IDs of platforms to activate. */
+  stops: string[]
+  /** Full platform data for new stops (from search results). Used to upsert if not yet in DB. */
+  stop_data?: StopData[]
 }
 
 export async function POST(req: NextRequest) {
@@ -20,15 +31,56 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // Deactivate all current stops
+    // Ensure the table exists (idempotent — safe to run on every call)
+    await sql`
+      CREATE TABLE IF NOT EXISTS tram_stops_config (
+        id           SERIAL PRIMARY KEY,
+        stop_id      TEXT NOT NULL UNIQUE,
+        stop_name    TEXT NOT NULL,
+        line         TEXT NOT NULL DEFAULT '',
+        direction_id INT,
+        headsign     TEXT,
+        platform     TEXT,
+        active       BOOLEAN DEFAULT TRUE
+      )
+    `
+    try {
+      await sql`ALTER TABLE tram_stops_config ADD COLUMN IF NOT EXISTS monitored_lines TEXT`
+    } catch { /* column may already exist on older Postgres versions */ }
+
+    // Deactivate all existing active stops
     await sql`UPDATE tram_stops_config SET active = FALSE`
 
-    // Activate the selected ones
     if (body.stops.length > 0) {
       for (const stopId of body.stops) {
-        await sql`
-          UPDATE tram_stops_config SET active = TRUE WHERE stop_id = ${stopId}
-        `
+        // Find full data for this stop from the request (so we can upsert new stops)
+        const data = body.stop_data?.find(s => s.stop_id === stopId)
+
+        if (data) {
+          // Upsert — handles both transport.opendata.ch IDs (new) and GTFS IDs (legacy)
+          await sql`
+            INSERT INTO tram_stops_config (stop_id, stop_name, line, headsign, monitored_lines, active)
+            VALUES (
+              ${data.stop_id},
+              ${data.stop_name},
+              ${data.line || ''},
+              ${data.headsign ?? null},
+              ${data.monitored_lines ?? null},
+              TRUE
+            )
+            ON CONFLICT (stop_id) DO UPDATE SET
+              stop_name      = EXCLUDED.stop_name,
+              line           = EXCLUDED.line,
+              headsign       = EXCLUDED.headsign,
+              monitored_lines = EXCLUDED.monitored_lines,
+              active         = TRUE
+          `
+        } else {
+          // Fallback: ID already in DB (from GTFS or prior save), just activate it
+          await sql`
+            UPDATE tram_stops_config SET active = TRUE WHERE stop_id = ${stopId}
+          `
+        }
       }
     }
 

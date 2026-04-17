@@ -8,28 +8,31 @@ import { neon, Pool } from '@neondatabase/serverless'
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgresql://build-placeholder:x@placeholder/db'
 
-export const sql = neon(DATABASE_URL)
+export const sql = neon(DATABASE_URL, { fetchOptions: { cache: 'no-store' } })
 
-// Pool client for multi-statement DDL (used in /api/setup)
+// Pool client for multi-statement DDL (used in /api/setup).
+// Uses the non-pooling direct URL so PgBouncer transaction mode doesn't
+// interfere with CREATE TABLE / CREATE INDEX statements.
 export function createPool() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error('DATABASE_URL environment variable is not set')
-  }
-  return new Pool({ connectionString: process.env.DATABASE_URL })
+  const url = process.env.DATABASE_URL_UNPOOLED ?? process.env.DATABASE_URL
+  if (!url) throw new Error('DATABASE_URL environment variable is not set')
+  return new Pool({ connectionString: url })
 }
 
 // Schema migration SQL — all tables created idempotently
 export const MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS readings (
-  id          BIGSERIAL PRIMARY KEY,
-  ts          TIMESTAMPTZ NOT NULL,
-  source      TEXT NOT NULL CHECK (source IN ('exterior','interior')),
-  db_raw      REAL NOT NULL,
-  db_cal      REAL,
-  tram_flag   BOOLEAN DEFAULT FALSE,
-  tram_line   TEXT,
-  tram_stop   TEXT,
-  tram_dir    TEXT
+  id           BIGSERIAL PRIMARY KEY,
+  ts           TIMESTAMPTZ NOT NULL,
+  source       TEXT NOT NULL,
+  db_raw       REAL NOT NULL,
+  db_cal       REAL,
+  tram_flag    BOOLEAN DEFAULT FALSE,
+  tram_line    TEXT,
+  tram_stop    TEXT,
+  tram_dir     TEXT,
+  device_id    TEXT,
+  device_label TEXT
 );
 
 CREATE INDEX IF NOT EXISTS readings_ts_idx ON readings (ts DESC);
@@ -83,13 +86,15 @@ CREATE TABLE IF NOT EXISTS gtfs_meta (
 export interface Reading {
   id: number
   ts: string
-  source: 'exterior' | 'interior'
+  source: string
   db_raw: number
   db_cal: number | null
   tram_flag: boolean
   tram_line: string | null
   tram_stop: string | null
   tram_dir: string | null
+  device_id: string | null
+  device_label: string | null
 }
 
 export interface LeqMinute {

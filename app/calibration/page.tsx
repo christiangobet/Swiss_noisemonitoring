@@ -10,67 +10,70 @@ import { formatZurichTime } from '@/lib/utils'
 import { CheckCircle2, AlertCircle, Clock, RotateCcw } from 'lucide-react'
 import { toast } from '@/hooks/use-toast'
 
-interface CalibrationData {
-  active: {
-    id: number
-    created_at: string
-    duration_sec: number
-    ext_mean_db: number
-    int_mean_db: number
-    offset_db: number
-    active: boolean
-    notes: string | null
-  } | null
-  history: Array<{
-    id: number
-    created_at: string
-    duration_sec: number
-    ext_mean_db: number
-    int_mean_db: number
-    offset_db: number
-    active: boolean
-    notes: string | null
-  }>
-  sensors: {
-    exterior: { online: boolean; last_seen: string | null }
-    interior: { online: boolean; last_seen: string | null }
-  }
-}
-
-interface LiveReading {
-  ts: string
-  db_cal: number | null
-}
-
-type WizardStep = 'idle' | 'instructions' | 'running' | 'results' | 'error'
-
-interface SessionResult {
+interface ActiveOffset {
+  source: string
   offset_db: number
-  ext_mean_db: number
-  int_mean_db: number
-  sample_count: number
+  created_at: string
   session_id: number
 }
 
+interface SessionSource {
+  source: string
+  mean_db: number
+  offset_db: number
+  sample_count: number
+  active: boolean
+}
+
+interface Session {
+  id: number
+  started_at: string
+  duration_sec: number
+  ref_source: string
+  status: string
+  notes: string | null
+  sources: SessionSource[] | null
+}
+
+interface CalibData {
+  active_offsets: ActiveOffset[]
+  sessions: Session[]
+  active_sources: string[]
+}
+
+interface SourceResult {
+  source: string
+  mean_db: number
+  offset_db: number
+  sample_count: number
+}
+
+interface FinishResult {
+  session_id: number
+  ref_source: string
+  sources: SourceResult[]
+}
+
+type WizardStep = 'idle' | 'setup' | 'running' | 'results' | 'error'
+
 export default function CalibrationPage() {
-  const [calibData, setCalibData] = useState<CalibrationData | null>(null)
+  const [calibData, setCalibData] = useState<CalibData | null>(null)
   const [loading, setLoading] = useState(true)
 
-  // Wizard state
   const [step, setStep] = useState<WizardStep>('idle')
+  const [refSource, setRefSource] = useState('')
   const [duration, setDuration] = useState(60)
   const [sessionId, setSessionId] = useState<number | null>(null)
   const [sessionStart, setSessionStart] = useState<Date | null>(null)
+  const [runSources, setRunSources] = useState<string[]>([])
   const [countdown, setCountdown] = useState(0)
-  const [liveExt, setLiveExt] = useState<number | null>(null)
-  const [liveInt, setLiveInt] = useState<number | null>(null)
-  const [emergingOffset, setEmergingOffset] = useState<number | null>(null)
-  const [result, setResult] = useState<SessionResult | null>(null)
-  const [notes, setNotes] = useState('')
+  const [liveReadings, setLiveReadings] = useState<Record<string, number | null>>({})
+  const [result, setResult] = useState<FinishResult | null>(null)
   const [wizardError, setWizardError] = useState('')
 
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const liveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const liveRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const finishCalledRef = useRef(false)
 
   const fetchCalib = useCallback(async () => {
     try {
@@ -84,48 +87,76 @@ export default function CalibrationPage() {
 
   useEffect(() => {
     fetchCalib()
-    const interval = setInterval(fetchCalib, 10000)
-    return () => clearInterval(interval)
+    const id = setInterval(fetchCalib, 10000)
+    return () => clearInterval(id)
   }, [fetchCalib])
 
   // Live readings during calibration
   useEffect(() => {
     if (step !== 'running') {
-      if (liveIntervalRef.current) clearInterval(liveIntervalRef.current)
+      if (liveRef.current) clearInterval(liveRef.current)
       return
     }
     const poll = async () => {
       try {
         const res = await fetch('/api/live')
         if (!res.ok) return
-        const data: { exterior: LiveReading[]; interior: LiveReading[] } = await res.json()
-        const ext = data.exterior.at(-1)?.db_cal
-        const int = data.interior.at(-1)?.db_cal
-        setLiveExt(ext ?? null)
-        setLiveInt(int ?? null)
-        if (ext != null && int != null) setEmergingOffset(ext - int)
+        const data: { sources: Record<string, Array<{ db_cal: number | null }>> } = await res.json()
+        const readings: Record<string, number | null> = {}
+        for (const [src, rows] of Object.entries(data.sources)) {
+          readings[src] = rows.at(-1)?.db_cal ?? null
+        }
+        setLiveReadings(readings)
       } catch { /* ignore */ }
     }
-    liveIntervalRef.current = setInterval(poll, 2000)
+    liveRef.current = setInterval(poll, 2000)
     poll()
-    return () => { if (liveIntervalRef.current) clearInterval(liveIntervalRef.current) }
+    return () => { if (liveRef.current) clearInterval(liveRef.current) }
   }, [step])
+
+  const finishCalibration = useCallback(async (sid: number) => {
+    if (finishCalledRef.current) return
+    finishCalledRef.current = true
+    if (liveRef.current) clearInterval(liveRef.current)
+    if (countdownRef.current) clearInterval(countdownRef.current)
+    try {
+      const res = await fetch('/api/calibration/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setWizardError(data.error ?? 'Failed to finish calibration')
+        setStep('error')
+        return
+      }
+      setResult(data as FinishResult)
+      setStep('results')
+    } catch (err) {
+      setWizardError(String(err))
+      setStep('error')
+    }
+  }, [])
 
   // Countdown timer
   useEffect(() => {
-    if (step !== 'running' || !sessionStart) return
+    if (step !== 'running' || !sessionStart || sessionId === null) return
+    finishCalledRef.current = false
+    const sid = sessionId
     const tick = () => {
       const elapsed = (Date.now() - sessionStart.getTime()) / 1000
       const remaining = Math.max(0, duration - elapsed)
       setCountdown(Math.ceil(remaining))
       if (remaining <= 0) {
-        if (intervalRef.current) clearInterval(intervalRef.current)
-        finishCalibration()
+        if (countdownRef.current) clearInterval(countdownRef.current)
+        finishCalibration(sid)
       }
     }
-    intervalRef.current = setInterval(tick, 500)
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
-  }, [step, sessionStart, duration])
+    countdownRef.current = setInterval(tick, 500)
+    tick()
+    return () => { if (countdownRef.current) clearInterval(countdownRef.current) }
+  }, [step, sessionStart, duration, sessionId, finishCalibration])
 
   const startCalibration = async () => {
     setWizardError('')
@@ -133,7 +164,7 @@ export default function CalibrationPage() {
       const res = await fetch('/api/calibration/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ duration_sec: duration }),
+        body: JSON.stringify({ ref_source: refSource, duration_sec: duration }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -143,7 +174,9 @@ export default function CalibrationPage() {
       }
       setSessionId(data.session_id)
       setSessionStart(new Date(data.started_at))
+      setRunSources(data.active_sources ?? [])
       setCountdown(duration)
+      setLiveReadings({})
       setStep('running')
     } catch (err) {
       setWizardError(String(err))
@@ -151,282 +184,231 @@ export default function CalibrationPage() {
     }
   }
 
-  const finishCalibration = async () => {
-    if (!sessionId) return
-    if (liveIntervalRef.current) clearInterval(liveIntervalRef.current)
-    try {
-      const res = await fetch('/api/calibration/finish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId }),
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        setWizardError(data.error ?? 'Failed to finish calibration')
-        setStep('error')
-        return
-      }
-      setResult(data)
-      setStep('results')
-    } catch (err) {
-      setWizardError(String(err))
-      setStep('error')
-    }
-  }
-
-  const confirmCalibration = async () => {
-    if (!result) return
-    if (notes) {
-      // Update notes via a direct API call if needed — for now just show success
-    }
-    toast({ title: 'Calibration saved', description: `Offset: ${result.offset_db.toFixed(1)} dB` })
-    setStep('idle')
-    setResult(null)
-    setNotes('')
-    setSessionId(null)
-    fetchCalib()
-  }
-
-  const reactivate = async (id: number) => {
+  const reactivate = async (sid: number) => {
     try {
       const res = await fetch('/api/calibration/reactivate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ calibration_id: id }),
+        body: JSON.stringify({ session_id: sid }),
       })
       if (res.ok) {
         toast({ title: 'Calibration reactivated' })
         fetchCalib()
+      } else {
+        const data = await res.json()
+        toast({ title: 'Error', description: data.error, variant: 'destructive' })
       }
     } catch { /* ignore */ }
   }
 
-  const sensors = calibData?.sensors
-  const extOnline = sensors?.exterior?.online ?? false
-  const intOnline = sensors?.interior?.online ?? false
-  const bothOnline = extOnline && intOnline
+  const reset = () => {
+    setStep('idle')
+    setResult(null)
+    setSessionId(null)
+    setWizardError('')
+    fetchCalib()
+  }
 
-  // Calibration health
-  const active = calibData?.active
-  const healthDrift = active && calibData
-    ? Math.abs((emergingOffset ?? active.offset_db) - active.offset_db)
-    : null
-  const health = healthDrift == null ? null : healthDrift < 3 ? 'good' : healthDrift < 5 ? 'warn' : 'bad'
+  const sourceOptions = calibData?.active_sources ?? []
+  const canStart = sourceOptions.length >= 2 && !!refSource && sourceOptions.includes(refSource)
+  const colCount = (n: number) => Math.min(n, 4)
 
   return (
     <div className="p-4 space-y-4">
       <h1 className="text-lg font-semibold text-foreground">Calibration</h1>
 
-      {/* Status card */}
+      {/* Active offsets */}
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
-            Calibration Status
+            Active Offsets
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent>
           {loading ? (
-            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-16 w-full" />
+          ) : calibData?.active_offsets && calibData.active_offsets.length > 0 ? (
+            <div className="flex flex-wrap gap-6">
+              {calibData.active_offsets.map(o => (
+                <div key={o.source}>
+                  <p className="text-xs text-muted-foreground">{o.source}</p>
+                  <p className="font-db text-2xl font-bold text-foreground">
+                    {o.offset_db >= 0 ? '+' : ''}{o.offset_db.toFixed(2)} dB
+                  </p>
+                  <p className="text-xs text-muted-foreground">{formatZurichTime(o.created_at, 'date')}</p>
+                </div>
+              ))}
+            </div>
           ) : (
-            <>
-              <div className="flex flex-wrap gap-3">
-                <div className="flex flex-col">
-                  <span className="text-xs text-muted-foreground">Active Offset</span>
-                  <span className="font-db text-2xl font-bold text-foreground">
-                    {active ? `${active.offset_db.toFixed(2)} dB` : '—'}
-                  </span>
-                  {active && (
-                    <span className="text-xs text-muted-foreground">
-                      Since {formatZurichTime(active.created_at, 'date')}
-                    </span>
-                  )}
-                </div>
-                <div className="flex-1" />
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-2">
-                    <Badge variant={extOnline ? 'success' : 'danger'} className="gap-1">
-                      {extOnline ? <CheckCircle2 className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
-                      Exterior
-                    </Badge>
-                    {sensors?.exterior?.last_seen && (
-                      <span className="text-xs text-muted-foreground">
-                        {formatZurichTime(sensors.exterior.last_seen, 'time')}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant={intOnline ? 'success' : 'danger'} className="gap-1">
-                      {intOnline ? <CheckCircle2 className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
-                      Interior
-                    </Badge>
-                    {sensors?.interior?.last_seen && (
-                      <span className="text-xs text-muted-foreground">
-                        {formatZurichTime(sensors.interior.last_seen, 'time')}
-                      </span>
-                    )}
-                  </div>
-                  {health && (
-                    <Badge variant={health === 'good' ? 'success' : health === 'warn' ? 'warning' : 'danger'}>
-                      {health === 'good' ? 'Calibration OK' : health === 'warn' ? 'Drifting' : 'Drift >5 dB'}
-                    </Badge>
-                  )}
-                </div>
-              </div>
-            </>
+            <p className="text-sm text-muted-foreground">No active calibration offsets.</p>
           )}
         </CardContent>
       </Card>
 
-      {/* Wizard */}
+      {/* Idle: source picker + start */}
       {step === 'idle' && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">New Calibration</CardTitle>
-            <CardDescription>
-              {!bothOnline
-                ? 'Both sensors must be online to calibrate.'
-                : 'Run a calibration session to correct the interior sensor offset.'}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button
-              onClick={() => setStep('instructions')}
-              disabled={!bothOnline}
-            >
-              Start Calibration Wizard
-            </Button>
-            {!bothOnline && (
-              <p className="mt-2 text-sm text-destructive">
-                {!extOnline && 'Exterior sensor offline. '}
-                {!intOnline && 'Interior sensor offline.'}
-              </p>
-            )}
-          </CardContent>
-        </Card>
+        <>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
+                Active Sources
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {loading ? <Skeleton className="h-8 w-full" /> : sourceOptions.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {sourceOptions.map(s => (
+                    <Badge key={s} variant="success" className="gap-1">
+                      <CheckCircle2 className="h-3 w-3" />{s}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <AlertCircle className="h-4 w-4 text-destructive" />
+                  No active sources in the last 30s.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">New Calibration</CardTitle>
+              <CardDescription>
+                Place 2+ devices next to each other recording the same ambient sound, then pick a reference.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {sourceOptions.length < 2 ? (
+                <p className="text-sm text-destructive">
+                  Need ≥2 active sources. Currently {sourceOptions.length} active.
+                </p>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-foreground">Reference source</label>
+                    <div className="flex flex-wrap gap-2">
+                      {sourceOptions.map(s => (
+                        <Button key={s} size="sm" variant={refSource === s ? 'default' : 'outline'} onClick={() => setRefSource(s)}>
+                          {s}
+                        </Button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      All other sources are calibrated relative to this one (its offset will be 0).
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-foreground">Duration</label>
+                    <div className="flex gap-2">
+                      {[30, 60, 120].map(d => (
+                        <Button key={d} size="sm" variant={duration === d ? 'default' : 'outline'} onClick={() => setDuration(d)}>
+                          {d}s
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                  <Button onClick={() => setStep('setup')} disabled={!refSource}>Continue →</Button>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </>
       )}
 
-      {step === 'instructions' && (
+      {/* Setup: instructions */}
+      {step === 'setup' && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Step 1 — Preparation</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <ol className="space-y-2 text-sm text-muted-foreground list-decimal list-inside">
-              <li>Place <strong className="text-foreground">both sensors</strong> in the same room, in open air.</li>
-              <li>Keep sensors away from walls and corners (≥ 50 cm).</li>
+              <li>Place <strong className="text-foreground">all devices</strong> in the same location, in open air.</li>
+              <li>Keep devices ≥ 50 cm from walls and corners.</li>
               <li>Ensure <strong className="text-foreground">no tram is currently passing</strong>.</li>
-              <li>Wait 10 seconds for readings to stabilise before starting.</li>
+              <li>Wait 10 s for readings to stabilise before starting.</li>
             </ol>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">Duration</label>
-              <div className="flex gap-2">
-                {[30, 60, 120].map(d => (
-                  <Button
-                    key={d}
-                    size="sm"
-                    variant={duration === d ? 'default' : 'outline'}
-                    onClick={() => setDuration(d)}
-                  >
-                    {d}s
-                  </Button>
-                ))}
-              </div>
-            </div>
-
+            <p className="text-sm">
+              Reference: <Badge variant="secondary">{refSource}</Badge>
+              &nbsp;·&nbsp;Duration: <strong>{duration}s</strong>
+            </p>
             <div className="flex gap-2">
-              <Button onClick={startCalibration}>
-                Start {duration}s Session
-              </Button>
-              <Button variant="outline" onClick={() => setStep('idle')}>
-                Cancel
-              </Button>
+              <Button onClick={startCalibration} disabled={!canStart}>Start {duration}s Session</Button>
+              <Button variant="outline" onClick={() => setStep('idle')}>Cancel</Button>
             </div>
           </CardContent>
         </Card>
       )}
 
+      {/* Running */}
       {step === 'running' && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
               <Clock className="h-4 w-4 animate-pulse text-amber-400" />
-              Step 2 — Recording…
+              Recording…
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <Progress value={((duration - countdown) / duration) * 100} />
-            <p className="text-center font-db text-2xl font-bold text-amber-400">
-              {countdown}s remaining
-            </p>
-
-            <div className="grid grid-cols-3 gap-4 text-center">
-              <div>
-                <p className="text-xs text-muted-foreground">Exterior</p>
-                <p className="font-db text-xl text-amber-400">
-                  {liveExt != null ? `${liveExt.toFixed(1)} dB` : '—'}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Interior</p>
-                <p className="font-db text-xl text-blue-400">
-                  {liveInt != null ? `${liveInt.toFixed(1)} dB` : '—'}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Emerging Offset</p>
-                <p className="font-db text-xl text-foreground">
-                  {emergingOffset != null ? `${emergingOffset.toFixed(1)} dB` : '—'}
-                </p>
-              </div>
+            <p className="text-center font-db text-2xl font-bold text-amber-400">{countdown}s remaining</p>
+            <div
+              className="grid gap-4"
+              style={{ gridTemplateColumns: `repeat(${colCount(runSources.length)}, minmax(0, 1fr))` }}
+            >
+              {runSources.map(src => (
+                <div key={src} className="text-center">
+                  <p className="text-xs text-muted-foreground mb-1">
+                    {src}{src === refSource ? ' (ref)' : ''}
+                  </p>
+                  <p className={`font-db text-xl ${src === refSource ? 'text-amber-400' : 'text-blue-400'}`}>
+                    {liveReadings[src] != null ? `${(liveReadings[src] as number).toFixed(1)} dB` : '—'}
+                  </p>
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>
       )}
 
+      {/* Results */}
       {step === 'results' && result && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Step 3 — Review Results</CardTitle>
+            <CardTitle className="text-base">Results</CardTitle>
+            <CardDescription>Reference: <strong>{result.ref_source}</strong></CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-3 gap-4 text-center">
-              <div>
-                <p className="text-xs text-muted-foreground">Exterior Mean</p>
-                <p className="font-db text-xl text-amber-400">{result.ext_mean_db.toFixed(2)} dB</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Interior Mean</p>
-                <p className="font-db text-xl text-blue-400">{result.int_mean_db.toFixed(2)} dB</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">New Offset</p>
-                <p className="font-db text-xl font-bold text-foreground">{result.offset_db.toFixed(2)} dB</p>
-              </div>
+            <div
+              className="grid gap-3"
+              style={{ gridTemplateColumns: `repeat(${colCount(result.sources.length)}, minmax(0, 1fr))` }}
+            >
+              {result.sources.map(s => (
+                <div key={s.source} className="text-center border border-border rounded-md p-3">
+                  <p className="text-xs text-muted-foreground mb-1">
+                    {s.source}{s.source === result.ref_source ? ' (ref)' : ''}
+                  </p>
+                  <p className="font-db text-xs text-muted-foreground">{s.mean_db.toFixed(1)} dB mean</p>
+                  <p className={`font-db text-xl font-bold ${s.source === result.ref_source ? 'text-muted-foreground' : 'text-foreground'}`}>
+                    {s.offset_db >= 0 ? '+' : ''}{s.offset_db.toFixed(2)} dB
+                  </p>
+                  <p className="text-xs text-muted-foreground">{s.sample_count} samples</p>
+                </div>
+              ))}
             </div>
-            <p className="text-xs text-muted-foreground">{result.sample_count} samples recorded.</p>
-
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-foreground">Notes (optional)</label>
-              <input
-                type="text"
-                value={notes}
-                onChange={e => setNotes(e.target.value)}
-                placeholder="e.g. After moving mic to windowsill"
-                className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
-              />
-            </div>
-
             <div className="flex gap-2">
-              <Button onClick={confirmCalibration}>Save Calibration</Button>
-              <Button variant="outline" onClick={() => { setStep('idle'); setResult(null) }}>
-                Discard
+              <Button onClick={() => { toast({ title: 'Calibration saved', description: `${result.sources.length} sources calibrated` }); reset() }}>
+                Done
               </Button>
+              <Button variant="outline" onClick={reset}>Discard</Button>
             </div>
           </CardContent>
         </Card>
       )}
 
+      {/* Error */}
       {step === 'error' && (
         <Card>
           <CardHeader>
@@ -434,15 +416,14 @@ export default function CalibrationPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground">{wizardError}</p>
-            <Button variant="outline" onClick={() => setStep('idle')}>
-              <RotateCcw className="h-4 w-4 mr-2" />
-              Try Again
+            <Button variant="outline" onClick={reset}>
+              <RotateCcw className="h-4 w-4 mr-2" />Try Again
             </Button>
           </CardContent>
         </Card>
       )}
 
-      {/* History table */}
+      {/* Session history */}
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
@@ -452,52 +433,46 @@ export default function CalibrationPage() {
         <CardContent>
           {loading ? (
             <Skeleton className="h-32 w-full" />
-          ) : calibData?.history && calibData.history.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border">
-                    <th className="text-left py-2 pr-4 text-muted-foreground font-medium">Date</th>
-                    <th className="text-right py-2 pr-4 text-muted-foreground font-medium">Offset</th>
-                    <th className="text-right py-2 pr-4 text-muted-foreground font-medium">Ext Mean</th>
-                    <th className="text-right py-2 pr-4 text-muted-foreground font-medium">Int Mean</th>
-                    <th className="text-left py-2 pr-4 text-muted-foreground font-medium">Notes</th>
-                    <th className="text-center py-2 text-muted-foreground font-medium">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {calibData.history.map(c => (
-                    <tr key={c.id} className="border-b border-border/50 hover:bg-accent/30">
-                      <td className="py-2 pr-4 font-db text-xs text-muted-foreground">
-                        {formatZurichTime(c.created_at, 'datetime')}
-                      </td>
-                      <td className="py-2 pr-4 text-right font-db font-semibold">
-                        {c.offset_db.toFixed(2)} dB
-                      </td>
-                      <td className="py-2 pr-4 text-right font-db text-amber-400">
-                        {c.ext_mean_db.toFixed(1)} dB
-                      </td>
-                      <td className="py-2 pr-4 text-right font-db text-blue-400">
-                        {c.int_mean_db.toFixed(1)} dB
-                      </td>
-                      <td className="py-2 pr-4 text-xs text-muted-foreground max-w-[200px] truncate">
-                        {c.notes && !c.notes.startsWith('PENDING:') ? c.notes : '—'}
-                      </td>
-                      <td className="py-2 text-center">
-                        {c.active ? (
-                          <Badge variant="success">Active</Badge>
-                        ) : !c.notes?.startsWith('PENDING:') ? (
-                          <Button size="sm" variant="outline" onClick={() => reactivate(c.id)}>
-                            Reactivate
-                          </Button>
-                        ) : (
-                          <Badge variant="secondary">Pending</Badge>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          ) : calibData?.sessions && calibData.sessions.length > 0 ? (
+            <div className="space-y-3">
+              {calibData.sessions.map(session => {
+                const isActive = session.sources?.some(s => s.active) ?? false
+                const validSources = session.sources?.filter(Boolean) ?? []
+                return (
+                  <div key={session.id} className="border border-border rounded-md p-3 space-y-2">
+                    <div className="flex items-start justify-between gap-2 flex-wrap">
+                      <div>
+                        <p className="text-xs text-muted-foreground">
+                          {formatZurichTime(session.started_at, 'datetime')}
+                          {' · '}{session.duration_sec}s{' · '}ref: <strong>{session.ref_source}</strong>
+                        </p>
+                        {session.notes && <p className="text-xs text-muted-foreground">{session.notes}</p>}
+                      </div>
+                      {isActive ? (
+                        <Badge variant="success">Active</Badge>
+                      ) : (
+                        <Button size="sm" variant="outline" onClick={() => reactivate(session.id)}>
+                          Reactivate
+                        </Button>
+                      )}
+                    </div>
+                    {validSources.length > 0 && (
+                      <div className="flex flex-wrap gap-4">
+                        {validSources.map(s => (
+                          <div key={s.source} className="text-center">
+                            <p className="text-xs text-muted-foreground">
+                              {s.source}{s.source === session.ref_source ? ' (ref)' : ''}
+                            </p>
+                            <p className="font-db text-sm font-semibold">
+                              {s.offset_db >= 0 ? '+' : ''}{s.offset_db.toFixed(2)} dB
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">No calibration sessions yet.</p>

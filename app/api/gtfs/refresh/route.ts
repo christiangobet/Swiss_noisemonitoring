@@ -3,154 +3,243 @@ export const maxDuration = 300
 
 import { NextRequest, NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
-import { parseCsv, VBZ_GTFS_URL, isTramRoute } from '@/lib/gtfs'
+import { parseCsv, VBZ_CKAN_API_URL, isTramRoute } from '@/lib/gtfs'
+import { unzipSync } from 'fflate'
 
-// JSZip-free approach: use built-in DecompressionStream or fetch individual files.
-// We use the unzip-stream approach via a streaming fetch + manual ZIP parsing.
-// For Vercel edge/serverless, we use the fflate library (bundled with Next.js).
-// Since we can't import fflate directly without adding it as a dep, we use
-// the native approach: fetch the ZIP and parse it server-side with Node.js zlib.
-
+// GET — called by Vercel cron or Settings UI.
+// Optional ?q=StopName to limit upsert to platforms at that stop only.
 export async function GET(req: NextRequest) {
-  // Allow Vercel cron (no auth) or manual call with INGEST_SECRET
-  const authHeader = req.headers.get('authorization') ?? req.headers.get('x-api-key')
-  const isCron = req.headers.get('x-vercel-cron') === '1'
-
-  if (!isCron && authHeader !== process.env.INGEST_SECRET) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  return runRefresh()
+  const q = req.nextUrl.searchParams.get('q')?.trim() ?? null
+  return runRefresh(q)
 }
 
+// POST — called from Pi or external tooling; requires INGEST_SECRET.
+// Optional body: { stop_name: string } to limit to one stop.
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get('x-api-key')
-  if (apiKey !== process.env.INGEST_SECRET) {
+  if (process.env.INGEST_SECRET && apiKey !== process.env.INGEST_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
-  return runRefresh()
+  let stopName: string | null = null
+  try {
+    const body = await req.json()
+    stopName = body?.stop_name?.trim() ?? null
+  } catch { /* body is optional */ }
+  return runRefresh(stopName)
 }
 
-async function runRefresh(): Promise<NextResponse> {
+// ── Lean byte-level parser for stop_times.txt ─────────────────────────────────
+// Calling parseCsv() on stop_times.txt creates one JS object per row (millions
+// of rows in VBZ), exhausting the 2 GB Vercel memory limit.
+// This scans raw bytes, extracts only trip_id + stop_id, and builds a compact map.
+//
+// targetStopIds: when provided (single-stop mode) only records stops in that set.
+// This skips ~99 % of rows instantly via a fast Set lookup on a 3-4 element set.
+function buildTramStopMap(
+  rawBytes: Uint8Array,
+  tramTripIds: Set<string>,
+  tripInfoMap: Map<string, { line: string; headsign: string; direction_id: number }>,
+  targetStopIds: Set<string> | null
+): Map<string, { line: string; headsign: string; direction_id: number }[]> {
+  const stopServiceMap = new Map<string, { line: string; headsign: string; direction_id: number }[]>()
+  const decoder = new TextDecoder('utf-8')
+  let tripIdIdx = -1
+  let stopIdIdx = -1
+  let headerParsed = false
+  let lineStart = 0
+
+  for (let i = 0; i <= rawBytes.length; i++) {
+    if (i === rawBytes.length || rawBytes[i] === 10 /* '\n' */) {
+      let lineEnd = i
+      if (lineEnd > lineStart && rawBytes[lineEnd - 1] === 13 /* '\r' */) lineEnd--
+
+      if (lineEnd > lineStart) {
+        const line = decoder.decode(rawBytes.subarray(lineStart, lineEnd))
+
+        if (!headerParsed) {
+          const cols = line.split(',')
+          tripIdIdx = cols.indexOf('trip_id')
+          stopIdIdx = cols.indexOf('stop_id')
+          headerParsed = true
+        } else if (tripIdIdx >= 0 && stopIdIdx >= 0) {
+          const cols = line.split(',')
+          const stopId = cols[stopIdIdx]
+          // Fast-path: skip stops not in the target set (single-stop mode)
+          if (targetStopIds !== null && !targetStopIds.has(stopId)) {
+            lineStart = i + 1
+            continue
+          }
+          const tripId = cols[tripIdIdx]
+          if (tripId && stopId && tramTripIds.has(tripId)) {
+            const info = tripInfoMap.get(tripId)
+            if (info) {
+              if (!stopServiceMap.has(stopId)) stopServiceMap.set(stopId, [])
+              const existing = stopServiceMap.get(stopId)!
+              if (!existing.some(e => e.line === info.line && e.direction_id === info.direction_id)) {
+                existing.push(info)
+              }
+            }
+          }
+        }
+      }
+      lineStart = i + 1
+    }
+  }
+
+  return stopServiceMap
+}
+
+async function runRefresh(stopNameFilter: string | null): Promise<NextResponse> {
   try {
-    // Fetch the ZIP
-    const response = await fetch(VBZ_GTFS_URL, {
+    // ── 1. Discover the current GTFS ZIP URL via the CKAN API ─────────────────
+    const ckanRes = await fetch(VBZ_CKAN_API_URL, {
       headers: { 'User-Agent': 'TramWatch/1.0' },
     })
+    if (!ckanRes.ok) {
+      return NextResponse.json(
+        { error: `CKAN API error: ${ckanRes.status} ${ckanRes.statusText}` },
+        { status: 502 }
+      )
+    }
+    const ckanData = await ckanRes.json() as {
+      success: boolean
+      result: { resources: Array<{ url: string; format: string; name: string }> }
+    }
+    if (!ckanData.success || !ckanData.result?.resources?.length) {
+      return NextResponse.json({ error: 'CKAN API returned no resources' }, { status: 502 })
+    }
+    const zipResource = ckanData.result.resources.find(
+      r => r.url.toLowerCase().endsWith('.zip') || r.format.toUpperCase() === 'ZIP'
+    )
+    if (!zipResource) {
+      return NextResponse.json(
+        { error: 'No ZIP resource found in CKAN package', resources: ckanData.result.resources.map(r => r.url) },
+        { status: 422 }
+      )
+    }
+    const gtfsZipUrl = zipResource.url
 
+    // ── 2. Fetch and unzip ────────────────────────────────────────────────────
+    const response = await fetch(gtfsZipUrl, {
+      headers: { 'User-Agent': 'TramWatch/1.0' },
+    })
     if (!response.ok) {
       return NextResponse.json(
-        { error: `Failed to fetch GTFS ZIP: ${response.status} ${response.statusText}` },
+        { error: `Failed to fetch GTFS ZIP: ${response.status} ${response.statusText}`, url: gtfsZipUrl },
         { status: 502 }
       )
     }
 
-    const arrayBuffer = await response.arrayBuffer()
-    const zipBuffer = Buffer.from(arrayBuffer)
+    const zipBuffer = new Uint8Array(await response.arrayBuffer())
+    const files = unzipSync(zipBuffer)
 
-    // Parse ZIP using fflate (bundled via next.js webpack)
-    // We use a dynamic import to avoid SSR issues
-    const { unzipSync } = await import('fflate')
-    const files = unzipSync(new Uint8Array(zipBuffer))
-
-    const getFile = (name: string): string | null => {
+    const getFileCsv = (name: string): string | null => {
       const entry = files[name]
-      if (!entry) return null
-      return new TextDecoder('utf-8').decode(entry)
+      return entry ? new TextDecoder('utf-8').decode(entry) : null
     }
 
-    const routesCsv = getFile('routes.txt')
-    const stopsCsv = getFile('stops.txt')
-    const tripsCsv = getFile('trips.txt')
-    const calendarCsv = getFile('calendar.txt')
-    const feedInfoCsv = getFile('feed_info.txt')
+    const routesCsv   = getFileCsv('routes.txt')
+    const stopsCsv    = getFileCsv('stops.txt')
+    const tripsCsv    = getFileCsv('trips.txt')
+    const calendarCsv = getFileCsv('calendar.txt')
+    const feedInfoCsv = getFileCsv('feed_info.txt')
+    const stopTimesRaw = files['stop_times.txt'] ?? null
 
     if (!routesCsv || !stopsCsv || !tripsCsv) {
       return NextResponse.json({ error: 'Required GTFS files not found in ZIP' }, { status: 422 })
     }
 
-    // Parse routes — tram only (route_type = 0)
+    // ── 3. Parse tram routes (route_type 0 standard, 900 Swiss extended) ──────
     const routes = parseCsv(routesCsv)
-    const tramRouteIds = new Set(
-      routes
-        .filter(r => isTramRoute(parseInt(r.route_type ?? '999', 10)))
-        .map(r => r.route_id)
-    )
-
-    // Parse trips for tram routes
-    const trips = parseCsv(tripsCsv)
-    const tramTrips = trips.filter(t => tramRouteIds.has(t.route_id))
-
-    // Build stop → route/headsign/direction mapping
-    const stopTimesCsv = getFile('stop_times.txt')
-    const stopTripMap: Map<string, { route_id: string; headsign: string; direction_id: number; route_short_name: string }[]> = new Map()
-
-    // Build trip_id → route info
-    const tripRouteMap = new Map<string, { route_id: string; headsign: string; direction_id: number; route_short_name: string }>()
-    for (const trip of tramTrips) {
-      const route = routes.find(r => r.route_id === trip.route_id)
-      tripRouteMap.set(trip.trip_id, {
-        route_id: trip.route_id,
-        headsign: trip.trip_headsign ?? '',
-        direction_id: parseInt(trip.direction_id ?? '0', 10),
-        route_short_name: route?.route_short_name ?? '',
-      })
-    }
-
-    if (stopTimesCsv) {
-      const stopTimes = parseCsv(stopTimesCsv)
-      for (const st of stopTimes) {
-        const tripInfo = tripRouteMap.get(st.trip_id)
-        if (!tripInfo) continue
-        if (!stopTripMap.has(st.stop_id)) stopTripMap.set(st.stop_id, [])
-        const existing = stopTripMap.get(st.stop_id)!
-        if (!existing.some(e => e.route_id === tripInfo.route_id && e.direction_id === tripInfo.direction_id)) {
-          existing.push(tripInfo)
-        }
+    const tramRouteMap = new Map<string, string>()
+    for (const r of routes) {
+      if (isTramRoute(parseInt(r.route_type ?? '999', 10))) {
+        tramRouteMap.set(r.route_id, r.route_short_name ?? '')
       }
     }
 
-    // Parse stops
-    const stops = parseCsv(stopsCsv)
-
-    // Find active stop_ids in our config and update their metadata
-    const activeStops = await sql`SELECT stop_id FROM tram_stops_config`
-    const activeStopIds = new Set(activeStops.map(s => s.stop_id as string))
-
-    let updatedCount = 0
-    for (const stop of stops) {
-      if (!activeStopIds.has(stop.stop_id)) continue
-      const tripInfos = stopTripMap.get(stop.stop_id) ?? []
-      const primary = tripInfos[0]
-
-      await sql`
-        UPDATE tram_stops_config
-        SET
-          stop_name = ${stop.stop_name},
-          line = ${primary?.route_short_name ?? 'unknown'},
-          direction_id = ${primary?.direction_id ?? null},
-          headsign = ${primary?.headsign ?? null}
-        WHERE stop_id = ${stop.stop_id}
-      `
-      updatedCount++
+    // ── 4. Build trip_id → { line, headsign, direction_id } ──────────────────
+    const trips = parseCsv(tripsCsv)
+    const tripInfoMap = new Map<string, { line: string; headsign: string; direction_id: number }>()
+    const tramTripIds = new Set<string>()
+    for (const t of trips) {
+      if (!tramRouteMap.has(t.route_id)) continue
+      const info = {
+        line: tramRouteMap.get(t.route_id)!,
+        headsign: t.trip_headsign ?? '',
+        direction_id: parseInt(t.direction_id ?? '0', 10),
+      }
+      tripInfoMap.set(t.trip_id, info)
+      tramTripIds.add(t.trip_id)
     }
 
-    // Parse calendar for validity window
+    // ── 5. Compute target stop IDs (single-stop mode) ─────────────────────────
+    // When stopNameFilter is set, only process and upsert platforms for that stop.
+    // The byte parser fast-paths past all other stop_ids → processes ~99% fewer rows.
+    const stops = parseCsv(stopsCsv)
+    let targetStopIds: Set<string> | null = null
+    if (stopNameFilter) {
+      const q = stopNameFilter.toLowerCase()
+      targetStopIds = new Set(
+        stops
+          .filter(s => (s.stop_name ?? '').toLowerCase().includes(q))
+          .map(s => s.stop_id)
+      )
+      if (targetStopIds.size === 0) {
+        return NextResponse.json(
+          { error: `No stops found matching "${stopNameFilter}" in GTFS` },
+          { status: 404 }
+        )
+      }
+    }
+
+    // ── 6. Build stop → service map (lean byte parser) ────────────────────────
+    const stopServiceMap = stopTimesRaw
+      ? buildTramStopMap(stopTimesRaw, tramTripIds, tripInfoMap, targetStopIds)
+      : new Map<string, { line: string; headsign: string; direction_id: number }[]>()
+
+    // ── 7. Upsert matched stops ───────────────────────────────────────────────
+    const tramStops = stops.filter(s => stopServiceMap.has(s.stop_id))
+
+    let upsertedCount = 0
+    for (const stop of tramStops) {
+      const services = stopServiceMap.get(stop.stop_id)!
+      const primary = services[0]
+      await sql`
+        INSERT INTO tram_stops_config (stop_id, stop_name, line, direction_id, headsign, active)
+        VALUES (
+          ${stop.stop_id},
+          ${stop.stop_name},
+          ${primary.line},
+          ${primary.direction_id},
+          ${primary.headsign},
+          FALSE
+        )
+        ON CONFLICT (stop_id) DO UPDATE SET
+          stop_name    = EXCLUDED.stop_name,
+          line         = EXCLUDED.line,
+          direction_id = EXCLUDED.direction_id,
+          headsign     = EXCLUDED.headsign
+      `
+      upsertedCount++
+    }
+
+    // ── 8. Log to gtfs_meta ───────────────────────────────────────────────────
     let validFrom: string | null = null
-    let validTo: string | null = null
+    let validTo:   string | null = null
     let feedVersion: string | null = null
 
     if (calendarCsv) {
       const calendar = parseCsv(calendarCsv)
-      const dates = calendar.map(r => r.start_date).filter(Boolean).sort()
-      const endDates = calendar.map(r => r.end_date).filter(Boolean).sort()
-      validFrom = dates[0] ? `${dates[0].substring(0, 4)}-${dates[0].substring(4, 6)}-${dates[0].substring(6, 8)}` : null
-      validTo = endDates[endDates.length - 1] ? `${endDates[endDates.length - 1].substring(0, 4)}-${endDates[endDates.length - 1].substring(4, 6)}-${endDates[endDates.length - 1].substring(6, 8)}` : null
+      const starts = calendar.map(r => r.start_date).filter(Boolean).sort()
+      const ends   = calendar.map(r => r.end_date).filter(Boolean).sort()
+      const fmt = (d: string) => `${d.substring(0,4)}-${d.substring(4,6)}-${d.substring(6,8)}`
+      validFrom = starts[0] ? fmt(starts[0]) : null
+      validTo   = ends[ends.length - 1] ? fmt(ends[ends.length - 1]) : null
     }
 
     if (feedInfoCsv) {
-      const feedInfo = parseCsv(feedInfoCsv)
-      feedVersion = feedInfo[0]?.feed_version ?? null
+      feedVersion = parseCsv(feedInfoCsv)[0]?.feed_version ?? null
     }
 
     await sql`
@@ -160,11 +249,13 @@ async function runRefresh(): Promise<NextResponse> {
 
     return NextResponse.json({
       success: true,
-      tram_routes: tramRouteIds.size,
-      stops_updated: updatedCount,
+      stop_filter: stopNameFilter,
+      tram_routes: tramRouteMap.size,
+      tram_stops_upserted: upsertedCount,
       feed_version: feedVersion,
       valid_from: validFrom,
       valid_to: validTo,
+      gtfs_url: gtfsZipUrl,
     })
   } catch (err) {
     console.error('GTFS refresh error:', err)

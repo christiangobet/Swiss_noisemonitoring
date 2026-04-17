@@ -16,61 +16,24 @@ export async function GET(req: NextRequest) {
   try {
     const since = new Date(Date.now() - hours * 3600 * 1000).toISOString()
 
-    // Day Leq exterior
-    const dayLeqExt = await sql`
+    // Day Leq — all sources combined
+    const dayLeq = await sql`
       SELECT 10 * LOG(AVG(POWER(10, db_cal / 10))) AS leq
       FROM readings
-      WHERE source = 'exterior'
-        AND db_cal IS NOT NULL
+      WHERE db_cal IS NOT NULL
         AND ts >= ${since}
         AND EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') >= 6
         AND EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') < 22
     `
 
-    // Night Leq exterior
-    const nightLeqExt = await sql`
+    // Night Leq — all sources combined
+    const nightLeq = await sql`
       SELECT 10 * LOG(AVG(POWER(10, db_cal / 10))) AS leq
       FROM readings
-      WHERE source = 'exterior'
-        AND db_cal IS NOT NULL
+      WHERE db_cal IS NOT NULL
         AND ts >= ${since}
         AND (EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') < 6
           OR EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') >= 22)
-    `
-
-    // Day Leq interior
-    const dayLeqInt = await sql`
-      SELECT 10 * LOG(AVG(POWER(10, db_cal / 10))) AS leq
-      FROM readings
-      WHERE source = 'interior'
-        AND db_cal IS NOT NULL
-        AND ts >= ${since}
-        AND EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') >= 6
-        AND EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') < 22
-    `
-
-    // Night Leq interior
-    const nightLeqInt = await sql`
-      SELECT 10 * LOG(AVG(POWER(10, db_cal / 10))) AS leq
-      FROM readings
-      WHERE source = 'interior'
-        AND db_cal IS NOT NULL
-        AND ts >= ${since}
-        AND (EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') < 6
-          OR EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') >= 22)
-    `
-
-    // Mean attenuation (exterior - interior, matched by minute)
-    const attenuationResult = await sql`
-      SELECT AVG(e.db_cal - i.db_cal) AS attenuation
-      FROM readings e
-      JOIN readings i
-        ON DATE_TRUNC('minute', e.ts) = DATE_TRUNC('minute', i.ts)
-      WHERE e.source = 'exterior'
-        AND i.source = 'interior'
-        AND e.db_cal IS NOT NULL
-        AND i.db_cal IS NOT NULL
-        AND e.ts >= ${since}
     `
 
     // Tram delta: mean dB during tram windows vs background
@@ -78,78 +41,70 @@ export async function GET(req: NextRequest) {
       WITH tram AS (
         SELECT AVG(db_cal) AS mean_tram
         FROM readings
-        WHERE source = 'exterior' AND db_cal IS NOT NULL
-          AND tram_flag = TRUE AND ts >= ${since}
+        WHERE db_cal IS NOT NULL AND tram_flag = TRUE AND ts >= ${since}
       ),
       bg AS (
         SELECT AVG(db_cal) AS mean_bg
         FROM readings
-        WHERE source = 'exterior' AND db_cal IS NOT NULL
-          AND tram_flag = FALSE AND ts >= ${since}
+        WHERE db_cal IS NOT NULL AND tram_flag = FALSE AND ts >= ${since}
       )
       SELECT tram.mean_tram - bg.mean_bg AS tram_delta
       FROM tram, bg
     `
 
-    // Exceedance minutes (exterior over ES II limits)
+    // Exceedance minutes over ES II day limit
     const exceedDayResult = await sql`
       SELECT COUNT(DISTINCT DATE_TRUNC('minute', ts)) AS cnt
       FROM readings
-      WHERE source = 'exterior'
-        AND db_cal > ${NOISE_LIMITS.day}
+      WHERE db_cal > ${NOISE_LIMITS.day}
         AND ts >= ${since}
         AND EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') >= 6
         AND EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') < 22
     `
 
+    // Exceedance minutes over ES II night limit
     const exceedNightResult = await sql`
       SELECT COUNT(DISTINCT DATE_TRUNC('minute', ts)) AS cnt
       FROM readings
-      WHERE source = 'exterior'
-        AND db_cal > ${NOISE_LIMITS.night}
+      WHERE db_cal > ${NOISE_LIMITS.night}
         AND ts >= ${since}
         AND (EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') < 6
           OR EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich') >= 22)
     `
 
-    // By tram line
+    // By tram line — aggregated across all sources that recorded tram passages
     const byLine = await sql`
       SELECT
         tram_line AS line,
-        tram_dir AS headsign,
-        COUNT(*) AS count,
-        AVG(e.db_cal) AS mean_db_ext,
-        AVG(i.db_cal) AS mean_db_int
-      FROM readings e
-      LEFT JOIN readings i
-        ON DATE_TRUNC('minute', e.ts) = DATE_TRUNC('minute', i.ts)
-        AND i.source = 'interior'
-      WHERE e.source = 'exterior'
-        AND e.tram_flag = TRUE
-        AND e.tram_line IS NOT NULL
-        AND e.ts >= ${since}
-      GROUP BY e.tram_line, e.tram_dir
+        tram_dir  AS headsign,
+        COUNT(*)  AS count,
+        AVG(db_cal) AS mean_db,
+        MAX(db_cal) AS peak_db
+      FROM readings
+      WHERE tram_flag = TRUE
+        AND tram_line IS NOT NULL
+        AND db_cal IS NOT NULL
+        AND ts >= ${since}
+      GROUP BY tram_line, tram_dir
       ORDER BY count DESC
     `
 
-    // By hour (24-element array)
+    // By hour — all sources combined
     const byHour = await sql`
       SELECT
         EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich')::int AS hour,
-        10 * LOG(AVG(CASE WHEN source='exterior' THEN POWER(10, db_cal/10) END)) AS leq_ext,
-        10 * LOG(AVG(CASE WHEN source='interior' THEN POWER(10, db_cal/10) END)) AS leq_int
+        10 * LOG(AVG(POWER(10, db_cal / 10))) AS leq
       FROM readings
       WHERE db_cal IS NOT NULL AND ts >= ${since}
       GROUP BY EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Zurich')
       ORDER BY hour
     `
 
-    // Tram events count today
+    // Tram events count
     const tramEventsTodayResult = await sql`
       SELECT COUNT(DISTINCT DATE_TRUNC('minute', ts)) AS cnt
       FROM readings
-      WHERE tram_flag = TRUE
-        AND ts >= ${since}
+      WHERE tram_flag = TRUE AND ts >= ${since}
     `
 
     // Last tram passage
@@ -163,11 +118,8 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       period_hours: hours,
-      day_leq_ext: dayLeqExt[0]?.leq ?? null,
-      night_leq_ext: nightLeqExt[0]?.leq ?? null,
-      day_leq_int: dayLeqInt[0]?.leq ?? null,
-      night_leq_int: nightLeqInt[0]?.leq ?? null,
-      attenuation_mean_db: attenuationResult[0]?.attenuation ?? null,
+      day_leq: dayLeq[0]?.leq ?? null,
+      night_leq: nightLeq[0]?.leq ?? null,
       tram_delta_db: tramDeltaResult[0]?.tram_delta ?? null,
       exceedance_minutes_day: Number(exceedDayResult[0]?.cnt ?? 0),
       exceedance_minutes_night: Number(exceedNightResult[0]?.cnt ?? 0),
@@ -175,17 +127,13 @@ export async function GET(req: NextRequest) {
       last_tram: lastTramResult[0] ?? null,
       limits: NOISE_LIMITS,
       by_line: byLine.map(r => ({
-        line: r.line,
+        line:     r.line,
         headsign: r.headsign,
-        count: Number(r.count),
-        mean_db_ext: r.mean_db_ext,
-        mean_db_int: r.mean_db_int,
+        count:    Number(r.count),
+        mean_db:  r.mean_db,
+        peak_db:  r.peak_db,
       })),
-      by_hour: byHour.map(r => ({
-        hour: r.hour,
-        leq_ext: r.leq_ext,
-        leq_int: r.leq_int,
-      })),
+      by_hour: byHour.map(r => ({ hour: r.hour, leq: r.leq })),
     })
   } catch (err) {
     console.error('Stats API error:', err)
