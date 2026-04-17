@@ -197,7 +197,9 @@ export function LiveChart() {
   const [tramScore,  setTramScore] = useState<TramScore>({ score: 0, rolling: 0, squeal: 0, flange: 0 })
   const [manualTags, setManualTags] = useState<ManualTag[]>([])
   const [tagFlash,   setTagFlash]   = useState(false)
-  const [dbStatus,   setDbStatus]   = useState<Record<string, { count: number; lastMs: number | null }>>({})
+  const [dbStatus,      setDbStatus]      = useState<Record<string, { count: number; lastMs: number | null }>>({})
+  // Accumulates all source names seen this session so lines don't vanish when a source goes quiet
+  const [seenSources,   setSeenSources]   = useState<string[]>([])
   const [, startTransition] = useTransition()
 
   // ── Device identity ──────────────────────────────────────────────────────────
@@ -294,6 +296,14 @@ export function LiveChart() {
         newStatus[src] = { count: readings.length, lastMs: last ? new Date(last.ts).getTime() : null }
       }
       setDbStatus(newStatus)
+      // Accumulate source names — never remove so lines persist when a source goes quiet
+      const incomingSources = Object.keys(data.sources)
+      if (incomingSources.length > 0) {
+        setSeenSources(prev => {
+          const merged = Array.from(new Set([...prev, ...incomingSources])).sort()
+          return merged.length === prev.length && merged.every((s, i) => s === prev[i]) ? prev : merged
+        })
+      }
       setLoading(false)
       setError(null)
     } catch (err) { setError(String(err)) }
@@ -547,17 +557,12 @@ export function LiveChart() {
     return Array.from(map.values()).sort((a, b) => a.tsMs - b.tsMs)
   }, [dbPoints, micPoints, micActive])
 
-  // Sorted list of all source names seen in the data (+ active mic source)
+  // All source names seen this session + active mic source, sorted for stable color assignment
   const knownSources = useMemo(() => {
-    const set = new Set<string>()
-    for (const p of points) {
-      for (const k of Object.keys(p)) {
-        if (k !== 'tsMs') set.add(k)
-      }
-    }
+    const set = new Set<string>(seenSources)
     if (micActive) set.add(micSource)
     return Array.from(set).sort()
-  }, [points, micActive, micSource])
+  }, [seenSources, micActive, micSource])
 
   // ── Render ────────────────────────────────────────────────────────────────
   if (loading) return <Skeleton className="w-full h-72" />
