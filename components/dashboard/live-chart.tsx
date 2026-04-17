@@ -70,6 +70,7 @@ const FUTURE_MS     = 2 * 60 * 1000
 const TRAM_PAD_MS   = 20 * 1000
 const CHART_TICK_MS   = 250
 const STORAGE_TICK_MS = 1000
+const LEQ_SMOOTH_N    = 4   // 4 × 250 ms = 1-second rolling Leq window
 const MIC_FLUSH_MS    = 5000
 const DB_OFFSET       = 94
 
@@ -256,6 +257,7 @@ export function LiveChart() {
   const currentDbRef   = useRef<number | null>(null)
   const micPointsRef   = useRef<ChartPoint[]>([])
   const bandHistoryRef = useRef<number[][]>([])
+  const leqBufRef      = useRef<number[]>([])
 
   const limit = useMemo(() => {
     const h = parseInt(
@@ -404,6 +406,7 @@ export function LiveChart() {
     setBands([])
     setTramScore({ score: 0, rolling: 0, squeal: 0, flange: 0 })
     bandHistoryRef.current = []
+    leqBufRef.current = []
     setManualTags([])
     micPointsRef.current = []
   }, [])
@@ -460,10 +463,16 @@ export function LiveChart() {
         if (tsMs - lastTickMs.current >= CHART_TICK_MS) {
           lastTickMs.current = tsMs
           if (db !== null) {
+            // Rolling 1-second Leq: energy-average over the last LEQ_SMOOTH_N ticks
+            leqBufRef.current.push(db)
+            if (leqBufRef.current.length > LEQ_SMOOTH_N) leqBufRef.current.shift()
+            const leq = 10 * Math.log10(
+              leqBufRef.current.reduce((s, v) => s + Math.pow(10, v / 10), 0) / leqBufRef.current.length
+            )
             const source = micSourceRef.current
             setMicPoints(prev => {
               const cutoff = tsMs - HISTORY_MS
-              const pt: ChartPoint = { tsMs, [source]: db }
+              const pt: ChartPoint = { tsMs, [source]: leq }
               return [...prev.filter(p => p.tsMs >= cutoff), pt]
             })
           }
