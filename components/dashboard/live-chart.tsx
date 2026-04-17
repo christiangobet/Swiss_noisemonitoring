@@ -20,6 +20,7 @@ import { NOISE_LIMITS } from '@/lib/db'
 
 interface Reading {
   ts: string
+  db_raw: number
   db_cal: number | null
 }
 
@@ -210,11 +211,12 @@ export function LiveChart() {
   const [micDb,        setMicDb]        = useState<number | null>(null)
   const [micError,     setMicError]     = useState<string | null>(null)
   const [micSaveError, setMicSaveError] = useState<string | null>(null)
+  const [lastSavedMs,  setLastSavedMs]  = useState<number | null>(null)
   const [bands,      setBands]     = useState<number[]>([])
   const [tramScore,  setTramScore] = useState<TramScore>({ score: 0, rolling: 0, squeal: 0, flange: 0 })
   const [manualTags, setManualTags] = useState<ManualTag[]>([])
   const [tagFlash,   setTagFlash]   = useState(false)
-  const [dbStatus,   setDbStatus]   = useState<{ ext: number; int: number }>({ ext: 0, int: 0 })
+  const [dbStatus,   setDbStatus]   = useState<{ ext: number; int: number; lastExtMs: number | null; lastIntMs: number | null }>({ ext: 0, int: 0, lastExtMs: null, lastIntMs: null })
   const [, startTransition] = useTransition()
 
   // ── Device identity (localStorage-persisted) ──────────────────────────────
@@ -280,14 +282,16 @@ export function LiveChart() {
   // ── DB polling (exterior + stored interior) every 2 s ─────────────────────
   const fetchLive = useCallback(async () => {
     try {
-      const res = await fetch('/api/live')
+      // cache: 'no-store' prevents the browser from serving a stale cached response
+      const res = await fetch('/api/live', { cache: 'no-store' })
       if (!res.ok) { setError('Failed to fetch live data'); return }
       const data: { exterior: Reading[]; interior: Reading[] } = await res.json()
       const cutoff = Date.now() - HISTORY_MS
       const extMap = new Map<string, number>()
-      for (const r of data.exterior) if (r.db_cal !== null) extMap.set(r.ts, r.db_cal)
+      // Accept db_raw as fallback so uncalibrated readings still show on chart
+      for (const r of data.exterior) extMap.set(r.ts, r.db_cal ?? r.db_raw)
       const intMap = new Map<string, number>()
-      for (const r of data.interior) if (r.db_cal !== null) intMap.set(r.ts, r.db_cal)
+      for (const r of data.interior) intMap.set(r.ts, r.db_cal ?? r.db_raw)
       const allTs = Array.from(new Set([
         ...Array.from(extMap.keys()),
         ...Array.from(intMap.keys()),
@@ -297,7 +301,15 @@ export function LiveChart() {
         ext:  extMap.get(ts) ?? null,
         int:  intMap.get(ts) ?? null,
       })))
-      setDbStatus({ ext: extMap.size, int: intMap.size })
+      // Most-recent timestamp per source (data is in ascending order after reverse())
+      const lastExt = data.exterior.at(-1)
+      const lastInt = data.interior.at(-1)
+      setDbStatus({
+        ext:       extMap.size,
+        int:       intMap.size,
+        lastExtMs: lastExt ? new Date(lastExt.ts).getTime() : null,
+        lastIntMs: lastInt ? new Date(lastInt.ts).getTime() : null,
+      })
       setLoading(false)
       setError(null)
     } catch (err) { setError(String(err)) }
@@ -516,6 +528,7 @@ export function LiveChart() {
           })
           if (res.ok) {
             setMicSaveError(null)
+            setLastSavedMs(Date.now())
           } else {
             const err = await res.json().catch(() => ({}))
             setMicSaveError(`Save error ${res.status}: ${(err as {error?: string}).error ?? 'unknown'}`)
@@ -642,8 +655,15 @@ export function LiveChart() {
               {micActive ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
               {micActive ? 'Stop mic' : 'Use mic'}
             </Button>
-            {micError     && <span className="text-xs text-destructive max-w-[200px] text-right">{micError}</span>}
-          {micSaveError && <span className="text-xs text-orange-400 max-w-[200px] text-right">{micSaveError}</span>}
+            {micError && <span className="text-xs text-destructive max-w-[200px] text-right">{micError}</span>}
+            {micSaveError && (
+              <span className="text-xs text-orange-400 max-w-[200px] text-right font-medium">⚠ {micSaveError}</span>
+            )}
+            {micActive && !micSaveError && lastSavedMs && (
+              <span className="text-[10px] text-green-500/70 text-right">
+                saved {Math.round((Date.now() - lastSavedMs) / 1000)}s ago
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -839,20 +859,21 @@ export function LiveChart() {
         </ResponsiveContainer>
       )}
 
-      {/* Sync status — shows DB reading counts so multi-device sync is visible */}
-      <div className="flex items-center gap-3 px-2 text-[10px] text-muted-foreground/60">
-        <span className={dbStatus.ext > 0 ? 'text-amber-400/70' : ''}>
-          ↑ Ext {dbStatus.ext} pts
-        </span>
-        <span className={dbStatus.int > 0 ? 'text-blue-400/70' : ''}>
-          ↑ Int {dbStatus.int} pts
-        </span>
-        {(dbStatus.ext === 0 || dbStatus.int === 0) && (
-          <span className="text-muted-foreground/40">
-            — waiting for {[dbStatus.ext === 0 && 'exterior', dbStatus.int === 0 && 'interior'].filter(Boolean).join(' & ')} data
-          </span>
-        )}
-      </div>
+      {/* Sync status — DB reading counts + age, one line per source */}
+      {(() => {
+        const nowMs = Date.now()
+        const fmtAge = (ms: number | null) => ms ? `${Math.round((nowMs - ms) / 1000)}s ago` : 'never'
+        return (
+          <div className="flex items-center gap-4 px-2 text-[10px]">
+            <span className={dbStatus.ext > 0 ? 'text-amber-400/80' : 'text-muted-foreground/40'}>
+              Ext DB: {dbStatus.ext} pts · last {fmtAge(dbStatus.lastExtMs)}
+            </span>
+            <span className={dbStatus.int > 0 ? 'text-blue-400/80' : 'text-muted-foreground/40'}>
+              Int DB: {dbStatus.int} pts · last {fmtAge(dbStatus.lastIntMs)}
+            </span>
+          </div>
+        )
+      })()}
 
       {/* Legend */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-2 text-xs text-muted-foreground">
