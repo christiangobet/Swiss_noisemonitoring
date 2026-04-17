@@ -8,7 +8,7 @@ import { neon, Pool } from '@neondatabase/serverless'
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgresql://build-placeholder:x@placeholder/db'
 
-export const sql = neon(DATABASE_URL)
+export const sql = neon(DATABASE_URL, { fetchOptions: { cache: 'no-store' } })
 
 // Pool client for multi-statement DDL (used in /api/setup).
 // Uses the non-pooling direct URL so PgBouncer transaction mode doesn't
