@@ -231,8 +231,13 @@ export function LiveChart() {
     }
     deviceIdRef.current = id
 
-    const src = localStorage.getItem('tramwatchSource')
-    if (src) { micSourceRef.current = src; setMicSourceState(src) }
+    // Derive a stable unique default source name from the device ID (first 8 hex chars)
+    const defaultSrc = id.replace(/-/g, '').slice(0, 8)
+    const savedSrc = localStorage.getItem('tramwatchSource')
+    const src = savedSrc || defaultSrc
+    if (!savedSrc) localStorage.setItem('tramwatchSource', defaultSrc)
+    micSourceRef.current = src
+    setMicSourceState(src)
 
     const label = localStorage.getItem('tramwatchDeviceLabel') ?? ''
     deviceLabelRef.current = label

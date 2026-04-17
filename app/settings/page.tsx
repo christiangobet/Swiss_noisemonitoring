@@ -64,8 +64,11 @@ export default function SettingsPage() {
       localStorage.setItem('tramwatchDeviceId', id)
     }
     setDeviceId(id)
-    const src = localStorage.getItem('tramwatchSource')
-    if (src) setDeviceSourceState(src)
+    const defaultSrc = id.replace(/-/g, '').slice(0, 8)
+    const savedSrc = localStorage.getItem('tramwatchSource')
+    const src = savedSrc || defaultSrc
+    if (!savedSrc) localStorage.setItem('tramwatchSource', defaultSrc)
+    setDeviceSourceState(src)
     setDeviceLabelState(localStorage.getItem('tramwatchDeviceLabel') ?? '')
   }, [])
 
