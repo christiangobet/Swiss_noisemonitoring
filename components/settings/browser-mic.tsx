@@ -6,9 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Mic, MicOff, RefreshCw } from 'lucide-react'
 
-const SAMPLE_INTERVAL_MS = 200   // one reading every 200 ms
-const FLUSH_INTERVAL_MS  = 2000  // push to DB every 2 s (max 10 readings/flush)
-const DB_OFFSET          = 94    // dBFS → approximate dBSPL (corrected later by calibration)
+const DB_OFFSET = 94   // dBFS → approximate dBSPL
 
 function rmsToDb(analyser: AnalyserNode): number {
   const buf = new Float32Array(analyser.fftSize)
@@ -19,6 +17,9 @@ function rmsToDb(analyser: AnalyserNode): number {
   return 20 * Math.log10(Math.max(rms, 1e-10)) + DB_OFFSET
 }
 
+// Device selector + live preview ONLY — no recording to DB.
+// Recording happens from the Dashboard (LiveChart) using the role + label
+// configured in the "This Device" section above.
 export function BrowserMicCard() {
   const [permission, setPermission] = useState<'unknown' | 'granted' | 'denied'>('unknown')
   const [devices,    setDevices]    = useState<MediaDeviceInfo[]>([])
@@ -30,9 +31,7 @@ export function BrowserMicCard() {
   const streamRef   = useRef<MediaStream | null>(null)
   const ctxRef      = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
-  const bufRef      = useRef<Array<{ ts: string; db_raw: number }>>([])
-  const sampleTimer = useRef<ReturnType<typeof setInterval> | null>(null)
-  const flushTimer  = useRef<ReturnType<typeof setInterval> | null>(null)
+  const rafRef      = useRef<number>(0)
 
   const enumerateDevices = useCallback(async () => {
     try {
@@ -47,7 +46,6 @@ export function BrowserMicCard() {
     } catch { /* permission not yet granted */ }
   }, [])
 
-  // Check permission on mount
   useEffect(() => {
     if (typeof navigator === 'undefined') return
     navigator.permissions
@@ -60,9 +58,8 @@ export function BrowserMicCard() {
           else if (p.state === 'denied') setPermission('denied')
         }
       })
-      .catch(() => { /* permissions API not available */ })
-
-    return () => stopMonitoring()
+      .catch(() => {})
+    return () => stopPreview()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -79,63 +76,43 @@ export function BrowserMicCard() {
     }
   }
 
-  const stopMonitoring = () => {
-    if (sampleTimer.current) clearInterval(sampleTimer.current)
-    if (flushTimer.current)  clearInterval(flushTimer.current)
+  const stopPreview = () => {
+    cancelAnimationFrame(rafRef.current)
     streamRef.current?.getTracks().forEach(t => t.stop())
     ctxRef.current?.close().catch(() => {})
-    streamRef.current   = null
-    ctxRef.current      = null
-    analyserRef.current = null
-    bufRef.current      = []
+    streamRef.current = ctxRef.current = analyserRef.current = null
     setActive(false)
     setCurrentDb(null)
   }
 
-  const startMonitoring = async () => {
+  const startPreview = async () => {
     setError(null)
     try {
-      const constraints: MediaStreamConstraints = {
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId:         deviceId ? { exact: deviceId } : undefined,
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl:  false,
         },
-      }
-      const stream  = await navigator.mediaDevices.getUserMedia(constraints)
+      })
       streamRef.current = stream
-
-      const ctx     = new AudioContext()
+      const ctx = new AudioContext()
       ctxRef.current = ctx
-      const source  = ctx.createMediaStreamSource(stream)
+      const src = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 4096
-      source.connect(analyser)
+      src.connect(analyser)
       analyserRef.current = analyser
 
-      // Sample loop
-      sampleTimer.current = setInterval(() => {
+      // Preview-only RAF loop — reads level, never writes to DB
+      const tick = () => {
         if (!analyserRef.current) return
-        const db = rmsToDb(analyserRef.current)
-        setCurrentDb(db)
-        bufRef.current.push({ ts: new Date().toISOString(), db_raw: Math.max(0, db) })
-      }, SAMPLE_INTERVAL_MS)
+        setCurrentDb(rmsToDb(analyserRef.current))
+        rafRef.current = requestAnimationFrame(tick)
+      }
+      rafRef.current = requestAnimationFrame(tick)
 
-      // Flush loop
-      flushTimer.current = setInterval(async () => {
-        const batch = bufRef.current.splice(0, 30)
-        if (batch.length === 0) return
-        try {
-          await fetch('/api/browser-ingest', {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ readings: batch }),
-          })
-        } catch { /* non-fatal */ }
-      }, FLUSH_INTERVAL_MS)
-
-      // Save chosen device
       localStorage.setItem('browserMicDeviceId', deviceId)
       setActive(true)
     } catch (e) {
@@ -155,11 +132,11 @@ export function BrowserMicCard() {
       <CardHeader>
         <CardTitle className="text-base flex items-center gap-2">
           <Mic className="h-4 w-4 text-muted-foreground" />
-          Browser Microphone
+          Microphone Device
         </CardTitle>
         <CardDescription>
-          Use this device&apos;s microphone as the interior sensor.
-          Raw values are approximate — run a calibration session for accuracy.
+          Select which microphone to use and verify the level. Recording to the database
+          happens from the Dashboard using the role set in &ldquo;This Device&rdquo; above.
         </CardDescription>
       </CardHeader>
 
@@ -179,13 +156,12 @@ export function BrowserMicCard() {
 
         {permission === 'granted' && (
           <>
-            {/* Device selector */}
             <div className="space-y-1">
               <label className="text-xs text-muted-foreground">Input device</label>
               <div className="flex gap-2">
                 <select
                   value={deviceId}
-                  onChange={e => setDeviceId(e.target.value)}
+                  onChange={e => { setDeviceId(e.target.value); localStorage.setItem('browserMicDeviceId', e.target.value) }}
                   disabled={active}
                   className="flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm
                              text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
@@ -196,52 +172,34 @@ export function BrowserMicCard() {
                     </option>
                   ))}
                 </select>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={enumerateDevices}
-                  disabled={active}
-                  title="Refresh device list"
-                >
+                <Button size="sm" variant="ghost" onClick={enumerateDevices} disabled={active} title="Refresh">
                   <RefreshCw className="h-4 w-4" />
                 </Button>
               </div>
             </div>
 
-            {/* Live level + controls */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 {active ? (
                   <>
                     <span className={`font-mono text-2xl font-bold tabular-nums ${dbColor(currentDb)}`}>
-                      {currentDb !== null ? `${currentDb.toFixed(1)}` : '—'}
+                      {currentDb !== null ? currentDb.toFixed(1) : '—'}
                     </span>
-                    <span className="text-xs text-muted-foreground">dB(A) raw</span>
+                    <span className="text-xs text-muted-foreground">dB(A) preview</span>
                     <Badge variant="outline" className="text-green-400 border-green-400/40 text-xs">
-                      Live
+                      Preview
                     </Badge>
                   </>
                 ) : (
-                  <span className="text-sm text-muted-foreground">Not monitoring</span>
+                  <span className="text-sm text-muted-foreground">Not previewing</span>
                 )}
               </div>
-
-              <Button
-                size="sm"
-                variant={active ? 'destructive' : 'default'}
-                onClick={active ? stopMonitoring : startMonitoring}
-              >
-                {active
-                  ? <><MicOff className="h-4 w-4 mr-2" />Stop</>
-                  : <><Mic className="h-4 w-4 mr-2" />Start monitoring</>}
+              <Button size="sm" variant={active ? 'destructive' : 'outline'} onClick={active ? stopPreview : startPreview}>
+                {active ? <><MicOff className="h-4 w-4 mr-2" />Stop</> : <><Mic className="h-4 w-4 mr-2" />Test mic</>}
               </Button>
             </div>
 
             {error && <p className="text-xs text-destructive">{error}</p>}
-
-            <p className="text-xs text-muted-foreground">
-              Readings flush to the database every 2 s as &ldquo;interior&rdquo; source.
-            </p>
           </>
         )}
       </CardContent>
