@@ -70,6 +70,7 @@ const FUTURE_MS     = 2 * 60 * 1000
 const TRAM_PAD_MS   = 20 * 1000
 const CHART_TICK_MS   = 250
 const STORAGE_TICK_MS = 1000
+const LEQ_SMOOTH_N    = 4   // 4 × 250 ms = 1-second rolling Leq window
 const MIC_FLUSH_MS    = 5000
 const DB_OFFSET       = 94
 
@@ -256,6 +257,21 @@ export function LiveChart() {
   const currentDbRef   = useRef<number | null>(null)
   const micPointsRef   = useRef<ChartPoint[]>([])
   const bandHistoryRef = useRef<number[][]>([])
+  const leqBufRef      = useRef<number[]>([])
+  const calOffsetRef   = useRef<number>(0)
+
+  // Fetch calibration offset for the active source and cache it in calOffsetRef
+  const fetchCalOffset = useCallback(async (source: string) => {
+    try {
+      const res = await fetch('/api/calibration', { cache: 'no-store' })
+      if (!res.ok) return
+      const data: { active_offsets: { source: string; offset_db: number }[] } = await res.json()
+      const row = data.active_offsets?.find(r => r.source === source)
+      calOffsetRef.current = row?.offset_db ?? 0
+    } catch { /* non-fatal */ }
+  }, [])
+
+  useEffect(() => { fetchCalOffset(micSource) }, [micSource, fetchCalOffset])
 
   const limit = useMemo(() => {
     const h = parseInt(
@@ -324,10 +340,11 @@ export function LiveChart() {
   useEffect(() => {
     fetchLive()
     fetchSchedule()
-    const t1 = setInterval(fetchLive,     2000)
-    const t2 = setInterval(fetchSchedule, 30000)
-    return () => { clearInterval(t1); clearInterval(t2) }
-  }, [fetchLive, fetchSchedule])
+    const t1 = setInterval(fetchLive,                        2000)
+    const t2 = setInterval(fetchSchedule,                   30000)
+    const t3 = setInterval(() => fetchCalOffset(micSourceRef.current), 60000)
+    return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3) }
+  }, [fetchLive, fetchSchedule, fetchCalOffset])
 
   useEffect(() => { micPointsRef.current = micPoints }, [micPoints])
 
@@ -404,6 +421,7 @@ export function LiveChart() {
     setBands([])
     setTramScore({ score: 0, rolling: 0, squeal: 0, flange: 0 })
     bandHistoryRef.current = []
+    leqBufRef.current = []
     setManualTags([])
     micPointsRef.current = []
   }, [])
@@ -455,15 +473,22 @@ export function LiveChart() {
         const tsMs = Date.now()
         currentDbRef.current = db
 
-        setMicDb(db)
+        setMicDb(db === null ? null : db + calOffsetRef.current)
 
         if (tsMs - lastTickMs.current >= CHART_TICK_MS) {
           lastTickMs.current = tsMs
           if (db !== null) {
+            // Rolling 1-second Leq: energy-average over the last LEQ_SMOOTH_N ticks
+            leqBufRef.current.push(db)
+            if (leqBufRef.current.length > LEQ_SMOOTH_N) leqBufRef.current.shift()
+            const leqRaw = 10 * Math.log10(
+              leqBufRef.current.reduce((s, v) => s + Math.pow(10, v / 10), 0) / leqBufRef.current.length
+            )
+            const leq = leqRaw + calOffsetRef.current
             const source = micSourceRef.current
             setMicPoints(prev => {
               const cutoff = tsMs - HISTORY_MS
-              const pt: ChartPoint = { tsMs, [source]: db }
+              const pt: ChartPoint = { tsMs, [source]: leq }
               return [...prev.filter(p => p.tsMs >= cutoff), pt]
             })
           }

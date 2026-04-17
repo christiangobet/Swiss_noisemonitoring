@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
   `
 
   return NextResponse.json({
-    session_id: result[0].id as number,
+    session_id: Number(result[0].id),
     started_at: startedAt,
     ends_at: endsAt,
     duration_sec,

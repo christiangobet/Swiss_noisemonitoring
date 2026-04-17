@@ -17,8 +17,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { session_id, notes } = body
-  if (!session_id || typeof session_id !== 'number') {
+  const session_id = Number(body.session_id)
+  const { notes } = body
+  if (!session_id || !Number.isFinite(session_id)) {
     return NextResponse.json({ error: 'session_id must be a number' }, { status: 400 })
   }
 
