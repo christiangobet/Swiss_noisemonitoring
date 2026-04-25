@@ -9,9 +9,10 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Skeleton } from '@/components/ui/skeleton'
 import { NOISE_LIMITS } from '@/lib/db'
 import { formatZurichTime } from '@/lib/utils'
-import { Search, RefreshCw, CheckCircle2, AlertCircle, Save, MapPin, ChevronDown, ChevronUp, Smartphone } from 'lucide-react'
+import { Search, RefreshCw, CheckCircle2, AlertCircle, Save, MapPin, ChevronDown, ChevronUp, Smartphone, Trash2 } from 'lucide-react'
 import { toast } from '@/hooks/use-toast'
 import { BrowserMicCard } from '@/components/settings/browser-mic'
+import { useRecorder } from '@/lib/recorder-context'
 
 interface LineDetail {
   line: string
@@ -51,10 +52,9 @@ interface SensorStatus {
 
 export default function SettingsPage() {
   // ── This-device identity (localStorage) ─────────────────────────────────────
-  const [deviceSource, setDeviceSourceState] = useState<string>('default')
-  const [deviceLabel,  setDeviceLabelState]  = useState('')
-  const [deviceId,     setDeviceId]          = useState('')
+  const { micSource, setMicSource, deviceLabel, setDeviceLabel } = useRecorder()
 
+  const [deviceId, setDeviceId] = useState('')
   useEffect(() => {
     let id = localStorage.getItem('tramwatchDeviceId')
     if (!id) {
@@ -64,22 +64,7 @@ export default function SettingsPage() {
       localStorage.setItem('tramwatchDeviceId', id)
     }
     setDeviceId(id)
-    const defaultSrc = id.replace(/-/g, '').slice(0, 8)
-    const savedSrc = localStorage.getItem('tramwatchSource')
-    const src = savedSrc || defaultSrc
-    if (!savedSrc) localStorage.setItem('tramwatchSource', defaultSrc)
-    setDeviceSourceState(src)
-    setDeviceLabelState(localStorage.getItem('tramwatchDeviceLabel') ?? '')
   }, [])
-
-  const handleDeviceSource = (v: string) => {
-    setDeviceSourceState(v)
-    localStorage.setItem('tramwatchSource', v)
-  }
-  const handleDeviceLabel = (v: string) => {
-    setDeviceLabelState(v)
-    localStorage.setItem('tramwatchDeviceLabel', v)
-  }
 
   // ── Active / monitored state ────────────────────────────────────────────────
   const [monitoredStop, setMonitoredStop] = useState<string | null>(null)
@@ -331,10 +316,10 @@ export default function SettingsPage() {
             </label>
             <Input
               id="device-source"
-              value={deviceSource}
+              value={micSource}
               onChange={e => {
                 const v = e.target.value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32)
-                handleDeviceSource(v || 'default')
+                setMicSource(v || 'default')
               }}
               placeholder="e.g. roof, iphone, laptop"
               className="max-w-xs font-mono"
@@ -352,7 +337,7 @@ export default function SettingsPage() {
             <Input
               id="device-label"
               value={deviceLabel}
-              onChange={e => handleDeviceLabel(e.target.value)}
+              onChange={e => setDeviceLabel(e.target.value)}
               placeholder="e.g. iPhone 15, MacBook, Raspberry Pi"
               className="max-w-xs"
             />
@@ -623,6 +608,79 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* ── Danger Zone ─────────────────────────────────────────────────────── */}
+      <DangerZoneCard />
     </div>
+  )
+}
+
+function DangerZoneCard() {
+  const [phase, setPhase] = useState<'idle' | 'confirm' | 'clearing' | 'done'>('idle')
+  const [deleted, setDeleted] = useState<number | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  const clear = async () => {
+    setPhase('clearing')
+    setErr(null)
+    try {
+      const res = await fetch('/api/admin/clear-readings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: 'yes' }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Unknown error')
+      setDeleted(data.deleted ?? null)
+      setPhase('done')
+    } catch (e) {
+      setErr(String(e))
+      setPhase('idle')
+    }
+  }
+
+  return (
+    <Card className="border-destructive/50">
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2 text-destructive">
+          <Trash2 className="h-4 w-4" />
+          Danger Zone
+        </CardTitle>
+        <CardDescription>Irreversible actions — use with care.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {phase === 'done' ? (
+          <p className="text-sm text-green-400">
+            All readings deleted{deleted !== null ? ` (${deleted} rows)` : ''}. Database is now empty.
+          </p>
+        ) : (
+          <>
+            <p className="text-sm text-muted-foreground">
+              Delete <strong>all readings</strong> from the database and start a clean recording session.
+            </p>
+            {err && <p className="text-sm text-destructive">{err}</p>}
+            {phase === 'idle' && (
+              <Button size="sm" variant="destructive" onClick={() => setPhase('confirm')}>
+                <Trash2 className="h-4 w-4 mr-2" />
+                Clear all readings
+              </Button>
+            )}
+            {phase === 'confirm' && (
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-destructive font-medium">Are you sure? This cannot be undone.</span>
+                <Button size="sm" variant="destructive" onClick={clear}>Yes, delete everything</Button>
+                <Button size="sm" variant="ghost" onClick={() => setPhase('idle')}>Cancel</Button>
+              </div>
+            )}
+            {phase === 'clearing' && (
+              <Button size="sm" variant="destructive" disabled>
+                <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                Clearing…
+              </Button>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
   )
 }
