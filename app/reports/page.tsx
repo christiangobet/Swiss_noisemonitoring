@@ -15,7 +15,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { NOISE_LIMITS } from '@/lib/db'
+import { NOISE_LIMITS } from '@/lib/utils'
 import { Download } from 'lucide-react'
 
 type Period = 'week' | 'month'

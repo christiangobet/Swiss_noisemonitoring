@@ -54,6 +54,18 @@ export function clamp(val: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, val))
 }
 
+export const NOISE_LIMITS = {
+  day: 55,   // 06:00–22:00
+  night: 45, // 22:00–06:00
+} as const
+
+export function isNighttime(utcDate: Date): boolean {
+  const zurichHour = new Date(
+    utcDate.toLocaleString('en-US', { timeZone: 'Europe/Zurich' })
+  ).getHours()
+  return zurichHour < 6 || zurichHour >= 22
+}
+
 // Color for dB value relative to limit
 export function dbColor(db: number, limit: number): string {
   if (db < limit - 5) return '#22c55e' // green — well within limits

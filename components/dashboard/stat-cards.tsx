@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { NOISE_LIMITS } from '@/lib/db'
+import { NOISE_LIMITS } from '@/lib/utils'
 import { formatDb, dbColor } from '@/lib/utils'
 import { TrendingDown, Train, AlertTriangle, Wind } from 'lucide-react'
 

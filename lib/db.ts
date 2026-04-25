@@ -141,15 +141,4 @@ export interface GtfsMeta {
 }
 
 // Swiss noise limits (ES II residential zone, LSV)
-export const NOISE_LIMITS = {
-  day: 55,   // 06:00–22:00
-  night: 45, // 22:00–06:00
-} as const
-
-// Determine day/night based on Europe/Zurich local hour
-export function isNighttime(utcDate: Date): boolean {
-  const zurichHour = new Date(
-    utcDate.toLocaleString('en-US', { timeZone: 'Europe/Zurich' })
-  ).getHours()
-  return zurichHour < 6 || zurichHour >= 22
-}
+export { NOISE_LIMITS, isNighttime } from './utils'

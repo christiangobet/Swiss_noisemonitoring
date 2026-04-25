@@ -17,7 +17,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import { Mic, MicOff, Tag } from 'lucide-react'
 import { formatZurichTime } from '@/lib/utils'
-import { NOISE_LIMITS } from '@/lib/db'
+import { NOISE_LIMITS } from '@/lib/utils'
 
 interface Reading {
   ts: string
