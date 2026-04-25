@@ -11,6 +11,7 @@ import {
   Radio,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { RecordingPill } from './recording-popover'
 
 const NAV_ITEMS = [
   { href: '/', label: 'Dashboard', icon: Activity },
@@ -54,6 +55,11 @@ export function Sidebar() {
           )
         })}
       </nav>
+
+      {/* Recording status */}
+      <div className="px-2 pb-2">
+        <RecordingPill popoverSide="right" />
+      </div>
 
       {/* Footer */}
       <div className="px-4 py-3 border-t border-border">
