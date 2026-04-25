@@ -10,6 +10,8 @@ import {
   Gauge,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { RecordingPill } from './recording-popover'
+import { useRecorder } from '@/lib/recorder-context'
 
 const NAV_ITEMS = [
   { href: '/', label: 'Live', icon: Activity },
@@ -21,9 +23,16 @@ const NAV_ITEMS = [
 
 export function MobileNav() {
   const pathname = usePathname()
+  const { micActive, gm1356Active } = useRecorder()
+  const isRecording = micActive || gm1356Active
 
   return (
     <nav className="md:hidden fixed bottom-0 inset-x-0 z-50 bg-card border-t border-border safe-area-inset-bottom">
+      {isRecording && (
+        <div className="border-b border-border/40 bg-card/95">
+          <RecordingPill popoverSide="top" mobileStyle={false} className="py-1" />
+        </div>
+      )}
       <div className="flex items-stretch h-16">
         {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
           const isActive = pathname === href || (href !== '/' && pathname.startsWith(href))

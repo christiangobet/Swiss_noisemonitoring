@@ -1,14 +1,16 @@
 import { Sidebar } from './sidebar'
 import { MobileNav } from './mobile-nav'
+import { RecorderProvider } from '@/lib/recorder-context'
+import { RecordingAwareMain } from './recording-aware-main'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-screen">
-      <Sidebar />
-      <main className="flex-1 flex flex-col min-h-screen pb-16 md:pb-0 overflow-auto">
-        {children}
-      </main>
-      <MobileNav />
-    </div>
+    <RecorderProvider>
+      <div className="flex min-h-screen">
+        <Sidebar />
+        <RecordingAwareMain>{children}</RecordingAwareMain>
+        <MobileNav />
+      </div>
+    </RecorderProvider>
   )
 }
