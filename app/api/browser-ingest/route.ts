@@ -148,6 +148,6 @@ export async function POST(req: NextRequest) {
     offset_applied: offsetDb,
     source,
     device_id: deviceId,
-    tram_flagged: flaggedCount,
+    tram_flagged_upper_bound: flaggedCount,  // IDs passed to UPDATE; actual new flags may be fewer
   })
 }
