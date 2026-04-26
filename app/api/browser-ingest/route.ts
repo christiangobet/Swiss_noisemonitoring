@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
 import { isValidIso } from '@/lib/utils'
+import { detectPassages } from '@/lib/detector'
 
 interface IngestReading {
   ts: string
@@ -108,5 +109,44 @@ export async function POST(req: NextRequest) {
     inserted++
   }
 
-  return NextResponse.json({ inserted, offset_applied: offsetDb, source, device_id: deviceId })
+  // ── Tram detection ─────────────────────────────────────────────────────
+  // Fetch causal look-back: last 120 readings for this source (covers
+  // BG_WIN=30 + VOTE_WIN=10 warm-up plus the freshly-inserted batch).
+  let flaggedCount = 0
+  try {
+    const lookback = (await sql`
+      SELECT id, ts, db_cal, db_raw
+      FROM readings
+      WHERE source = ${source}
+      ORDER BY ts DESC
+      LIMIT 120
+    `) as { id: bigint; ts: string; db_cal: number | null; db_raw: number }[]
+    const window = lookback.reverse().map(r => ({
+      id:   r.id,
+      tsMs: new Date(r.ts).getTime(),
+      db:   r.db_cal ?? r.db_raw,
+    }))
+
+    const passages = detectPassages(window)
+    const ids = passages.flatMap(p => p.readingIds)
+
+    if (ids.length > 0) {
+      await sql`
+        UPDATE readings
+        SET tram_flag = TRUE
+        WHERE id = ANY(${ids as unknown as number[]})
+      `
+      flaggedCount = ids.length
+    }
+  } catch (err) {
+    console.error('browser-ingest: tram detection failed (non-fatal)', err)
+  }
+
+  return NextResponse.json({
+    inserted,
+    offset_applied: offsetDb,
+    source,
+    device_id: deviceId,
+    tram_flagged: flaggedCount,
+  })
 }
