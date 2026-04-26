@@ -23,6 +23,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid from/to date' }, { status: 400 })
   }
 
+  const MAX_RANGE_MS = 30 * 24 * 3600 * 1000  // 30 days
+  if (toDate.getTime() - fromDate.getTime() > MAX_RANGE_MS) {
+    return NextResponse.json({ error: 'Range must not exceed 30 days' }, { status: 400 })
+  }
+
   // Determine sources to process
   let sources: string[]
   if (typeof body.source === 'string' && body.source.trim()) {
@@ -37,6 +42,13 @@ export async function POST(req: NextRequest) {
 
   let passagesFound   = 0
   let readingsFlagged = 0
+
+  // Hoisted once — reused for every source in the loop
+  const toDetectorRow = (r: { id: bigint; ts: string; db_cal: number | null; db_raw: number }) => ({
+    id:   r.id,
+    tsMs: new Date(r.ts).getTime(),
+    db:   r.db_cal ?? r.db_raw,
+  })
 
   for (const src of sources) {
     // 120-reading warm-up before range start (for BG_WIN + VOTE_WIN context)
@@ -54,25 +66,23 @@ export async function POST(req: NextRequest) {
       ORDER BY ts ASC
     `) as { id: bigint; ts: string; db_cal: number | null; db_raw: number }[]
 
-    const toDetectorRow = (r: { id: bigint; ts: string; db_cal: number | null; db_raw: number }) => ({
-      id:   r.id,
-      tsMs: new Date(r.ts).getTime(),
-      db:   r.db_cal ?? r.db_raw,
-    })
-
-    const window = [...warmupRows.reverse().map(toDetectorRow), ...inRangeRows.map(toDetectorRow)]
-    const passages = detectPassages(window)
+    // Spread before reverse to avoid mutating the original warmupRows array
+    const detectorInput = [...[...warmupRows].reverse().map(toDetectorRow), ...inRangeRows.map(toDetectorRow)]
+    const passages = detectPassages(detectorInput)
 
     // Only flag IDs that are within the requested range
     const inRangeIdSet = new Set(inRangeRows.map(r => String(r.id)))
     const rangeStart   = fromDate.getTime()
 
+    // Number() is safe: Neon BIGSERIAL IDs stay well below 2^53
     const flagIds = passages
       .flatMap(p => p.readingIds)
       .filter(id => inRangeIdSet.has(String(id)))
-      .map(id => Number(id))
+      .map(id => Number(id))  // bigint → number required: Neon tagged template can't serialize BigInt in arrays
 
-    passagesFound  += passages.filter(p => p.startMs >= rangeStart).length
+    // Count passages that overlap with the range (endMs >= rangeStart catches passages
+    // that started during warm-up but extend into the requested window)
+    passagesFound  += passages.filter(p => p.endMs >= rangeStart).length
     readingsFlagged += flagIds.length
 
     if (!dryRun && flagIds.length > 0) {
