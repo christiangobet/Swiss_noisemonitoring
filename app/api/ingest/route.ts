@@ -5,6 +5,7 @@ import { sql } from '@/lib/db'
 import { isValidIso } from '@/lib/utils'
 import { getUpcomingTrams, findTramAtTime, type TramDeparture } from '@/lib/transport'
 
+
 interface IngestReading {
   ts: string
   db_raw: number

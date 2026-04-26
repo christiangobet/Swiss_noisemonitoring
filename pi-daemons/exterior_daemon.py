@@ -1,44 +1,40 @@
 #!/usr/bin/env python3
 """
-TramWatch — Exterior Sensor Daemon
-Reads Benetech GM1356 USB SPL meter via hidapi and POSTs readings to TramWatch.
+TramWatch — GM1356 SPL Meter Daemon (Benetech USB HID)
+Streams 1-second SPL readings from a Benetech GM1356 to TramWatch as a named
+remote source. No tram detection — done later when reviewing the dataset.
 
-# ============================================================
-# SYSTEMD SERVICE FILE — save as /etc/systemd/system/tramwatch-exterior.service
-# ============================================================
-# [Unit]
-# Description=TramWatch Exterior SPL Daemon
-# After=network-online.target
-# Wants=network-online.target
-#
-# [Service]
-# Type=simple
-# User=pi
-# EnvironmentFile=/etc/tramwatch/exterior.env
-# ExecStart=/usr/bin/python3 /home/pi/tramwatch/exterior_daemon.py
-# Restart=always
-# RestartSec=5
-# StandardOutput=journal
-# StandardError=journal
-#
-# [Install]
-# WantedBy=multi-user.target
-# ============================================================
-#
-# INSTALL:
-#   pip3 install hidapi requests
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable tramwatch-exterior
-#   sudo systemctl start tramwatch-exterior
-#
-# UDEV RULE (no sudo needed for USB access):
-#   Create /etc/udev/rules.d/99-gm1356.rules:
-#     SUBSYSTEM=="hidraw", ATTRS{idVendor}=="64bd", ATTRS{idProduct}=="74e3", MODE="0666"
-#   Then: sudo udevadm control --reload-rules && sudo udevadm trigger
-#
-# ENVIRONMENT VARIABLES (set in /etc/tramwatch/exterior.env):
-#   TRAMWATCH_URL=https://your-app.vercel.app
-#   TRAMWATCH_SECRET=your-ingest-secret
+SYSTEMD SERVICE — /etc/systemd/system/tramwatch-spl.service
+  [Unit]
+  Description=TramWatch GM1356 SPL Daemon
+  After=network-online.target
+  Wants=network-online.target
+  [Service]
+  Type=simple
+  User=pi
+  EnvironmentFile=/etc/tramwatch/spl.env
+  ExecStart=/usr/bin/python3 /home/pi/tramwatch/exterior_daemon.py
+  Restart=always
+  RestartSec=5
+  StandardOutput=journal
+  StandardError=journal
+  [Install]
+  WantedBy=multi-user.target
+
+INSTALL:
+  sudo apt-get install -y libhidapi-dev
+  pip3 install hidapi requests
+
+UDEV RULE (no sudo for USB access):
+  /etc/udev/rules.d/99-gm1356.rules:
+    SUBSYSTEM=="hidraw", ATTRS{idVendor}=="64bd", ATTRS{idProduct}=="74e3", MODE="0666"
+  sudo udevadm control --reload-rules && sudo udevadm trigger
+
+ENVIRONMENT VARIABLES (/etc/tramwatch/spl.env):
+  TRAMWATCH_URL=https://your-app.vercel.app
+  SOURCE_NAME=spl-ext           # shown as source name in the live chart
+  FLUSH_INTERVAL=2              # seconds between POSTs (2s matches live chart poll)
+  SAMPLE_INTERVAL=1             # seconds between SPL meter reads
 """
 
 import hid
@@ -60,26 +56,23 @@ VENDOR_ID  = 0x64BD
 PRODUCT_ID = 0x74E3
 CMD_BUFFER = [0x00, 0xB3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
 
-TRAMWATCH_URL    = os.environ.get("TRAMWATCH_URL", "").rstrip("/")
-TRAMWATCH_SECRET = os.environ.get("TRAMWATCH_SECRET", "")
-FLUSH_INTERVAL   = int(os.environ.get("FLUSH_INTERVAL", "10"))   # seconds between POSTs
-SAMPLE_INTERVAL  = float(os.environ.get("SAMPLE_INTERVAL", "1")) # seconds between reads
-HEALTH_FILE      = os.environ.get("HEALTH_FILE", "/tmp/tramwatch_exterior.json")
-MAX_BUFFER       = 60
+TRAMWATCH_URL  = os.environ.get("TRAMWATCH_URL", "").rstrip("/")
+SOURCE_NAME    = (os.environ.get("SOURCE_NAME", "pi-spl").strip() or "pi-spl")[:32]
+FLUSH_INTERVAL = int(os.environ.get("FLUSH_INTERVAL", "2"))
+SAMPLE_INTERVAL = float(os.environ.get("SAMPLE_INTERVAL", "1"))
+HEALTH_FILE    = os.environ.get("HEALTH_FILE", "/tmp/tramwatch_spl.json")
+MAX_BUFFER     = 60
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [exterior] %(levelname)s %(message)s",
+    format=f"%(asctime)s [{SOURCE_NAME}] %(levelname)s %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
-log = logging.getLogger("exterior")
+log = logging.getLogger(SOURCE_NAME)
 
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
 buffer: deque[dict] = deque(maxlen=MAX_BUFFER)
 running = True
 
@@ -95,15 +88,13 @@ signal.signal(signal.SIGINT, handle_signal)
 
 
 # ---------------------------------------------------------------------------
-# GM1356 reader
+# GM1356
 # ---------------------------------------------------------------------------
 def decode_db(data: list[int]) -> float:
-    """Convert raw GM1356 HID report bytes to dB(A)."""
     return (data[1] * 256 + data[2]) * 0.1
 
 
 def open_device() -> hid.device | None:
-    """Try to open the GM1356. Returns device or None."""
     try:
         dev = hid.device()
         dev.open(VENDOR_ID, PRODUCT_ID)
@@ -116,7 +107,6 @@ def open_device() -> hid.device | None:
 
 
 def read_once(dev: hid.device) -> float | None:
-    """Send command, read response, return dB value or None on error."""
     try:
         dev.write(CMD_BUFFER)
         data = dev.read(8, timeout_ms=2000)
@@ -129,35 +119,34 @@ def read_once(dev: hid.device) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Flush to API
+# Flush to server (no API key — same endpoint as browser)
 # ---------------------------------------------------------------------------
 def flush_buffer():
     if not buffer:
         return
-    if not TRAMWATCH_URL or not TRAMWATCH_SECRET:
-        log.warning("TRAMWATCH_URL or TRAMWATCH_SECRET not set — skipping flush")
+    if not TRAMWATCH_URL:
+        log.warning("TRAMWATCH_URL not set — skipping flush")
         return
 
     readings = list(buffer)
     buffer.clear()
 
-    payload = {"source": "exterior", "readings": readings}
-    url = f"{TRAMWATCH_URL}/api/ingest"
+    payload = {"source": SOURCE_NAME, "readings": readings}
+    url = f"{TRAMWATCH_URL}/api/browser-ingest"
 
     for attempt in range(3):
         try:
-            resp = requests.post(
-                url,
-                json=payload,
-                headers={"x-api-key": TRAMWATCH_SECRET},
-                timeout=10,
-            )
+            resp = requests.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                log.info("Flushed %d readings → inserted=%d", len(readings), data.get("inserted", "?"))
+                log.info(
+                    "Flushed %d readings → inserted=%d offset_applied=%.2f",
+                    len(readings),
+                    data.get("inserted", 0),
+                    data.get("offset_applied", 0.0),
+                )
                 return
-            else:
-                log.warning("API returned %d: %s", resp.status_code, resp.text[:120])
+            log.warning("API returned %d: %s", resp.status_code, resp.text[:120])
         except requests.RequestException as e:
             log.warning("Flush attempt %d failed: %s", attempt + 1, e)
         time.sleep(2 ** attempt)
@@ -166,76 +155,62 @@ def flush_buffer():
 
 
 def write_health(db_value: float | None):
-    data = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "db_raw": db_value,
-        "source": "exterior",
-        "buffer_size": len(buffer),
-    }
     try:
         with open(HEALTH_FILE, "w") as f:
-            json.dump(data, f)
+            json.dump({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "db_raw": db_value,
+                "source": SOURCE_NAME,
+                "buffer_size": len(buffer),
+            }, f)
     except OSError:
         pass
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# Main
 # ---------------------------------------------------------------------------
 def main():
-    log.info("TramWatch exterior daemon starting")
+    log.info("Starting (source=%s FLUSH_INTERVAL=%ds SAMPLE_INTERVAL=%.1fs)",
+             SOURCE_NAME, FLUSH_INTERVAL, SAMPLE_INTERVAL)
     if not TRAMWATCH_URL:
-        log.error("TRAMWATCH_URL is not set")
-        sys.exit(1)
+        log.error("TRAMWATCH_URL is not set"); sys.exit(1)
 
     dev = None
     last_flush = time.monotonic()
 
     while running:
-        # Reconnect if needed
         if dev is None:
             dev = open_device()
             if dev is None:
-                log.info("Retrying USB open in 5s…")
-                time.sleep(5)
-                continue
+                time.sleep(5); continue
 
-        # Read one sample
         db_val = read_once(dev)
 
         if db_val is None:
-            log.warning("Bad read — closing device for reconnect")
-            try:
-                dev.close()
-            except Exception:
-                pass
+            log.warning("Bad read — reconnecting")
+            try: dev.close()
+            except Exception: pass
             dev = None
             write_health(None)
             time.sleep(1)
             continue
 
-        ts = datetime.now(timezone.utc).isoformat()
-        buffer.append({"ts": ts, "db_raw": db_val})
+        buffer.append({"ts": datetime.now(timezone.utc).isoformat(), "db_raw": db_val})
         write_health(db_val)
-        log.debug("%.1f dB(A) @ %s", db_val, ts)
+        log.debug("%.1f dB(A)", db_val)
 
-        # Flush on interval
-        now = time.monotonic()
-        if now - last_flush >= FLUSH_INTERVAL:
+        if time.monotonic() - last_flush >= FLUSH_INTERVAL:
             flush_buffer()
-            last_flush = now
+            last_flush = time.monotonic()
 
-        # Sleep until next sample
         time.sleep(SAMPLE_INTERVAL)
 
-    # Final flush on shutdown
     flush_buffer()
     if dev:
-        try:
-            dev.close()
-        except Exception:
-            pass
-    log.info("Exterior daemon stopped")
+        try: dev.close()
+        except Exception: pass
+    log.info("Stopped")
 
 
 if __name__ == "__main__":
