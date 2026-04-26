@@ -91,7 +91,7 @@ signal.signal(signal.SIGINT, handle_signal)
 # GM1356
 # ---------------------------------------------------------------------------
 def decode_db(data: list[int]) -> float:
-    return (data[1] * 256 + data[2]) * 0.1
+    return (data[0] * 256 + data[1]) / 10.0
 
 
 def open_device() -> hid.device | None:
