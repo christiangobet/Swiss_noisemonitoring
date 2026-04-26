@@ -17,6 +17,8 @@ export async function GET(req: NextRequest) {
   if (!['minute', 'hour', 'day'].includes(resolution))
     return NextResponse.json({ error: 'Invalid resolution' }, { status: 400 })
 
+  const sourceFilter = searchParams.get('source')
+
   try {
     if (resolution === 'minute') {
       // Return raw 1-second readings so the UI can render an oscilloscope-style view
@@ -26,6 +28,7 @@ export async function GET(req: NextRequest) {
         FROM readings
         WHERE ts >= ${from}::timestamptz AND ts <= ${to}::timestamptz
           AND db_cal IS NOT NULL
+          ${sourceFilter ? sql`AND source = ${sourceFilter}` : sql``}
         ORDER BY ts ASC, source ASC
         LIMIT ${RAW_LIMIT}`
       return NextResponse.json({ raw: rows, capped: rows.length === RAW_LIMIT })
@@ -41,6 +44,7 @@ export async function GET(req: NextRequest) {
                  COUNT(*)::int AS n
           FROM readings
           WHERE ts >= ${from}::timestamptz AND ts <= ${to}::timestamptz AND db_cal IS NOT NULL
+            ${sourceFilter ? sql`AND source = ${sourceFilter}` : sql``}
           GROUP BY 1, source ORDER BY 1 ASC, source ASC`,
         sql`
           WITH flagged AS (
@@ -49,6 +53,7 @@ export async function GET(req: NextRequest) {
             FROM readings
             WHERE tram_flag = TRUE
               AND ts >= ${from}::timestamptz AND ts <= ${to}::timestamptz
+              ${sourceFilter ? sql`AND source = ${sourceFilter}` : sql``}
           ),
           with_events AS (
             SELECT ts, source,
@@ -86,6 +91,7 @@ export async function GET(req: NextRequest) {
              COUNT(*)::int AS n
       FROM readings
       WHERE ts >= ${from}::timestamptz AND ts <= ${to}::timestamptz AND db_cal IS NOT NULL
+        ${sourceFilter ? sql`AND source = ${sourceFilter}` : sql``}
       GROUP BY 1, source ORDER BY 1 ASC, source ASC`
     return NextResponse.json({ points: rows })
 
