@@ -63,6 +63,36 @@ const SOURCE_COLORS = [
   '#F59E0B', '#60A5FA', '#34D399', '#F87171',
   '#A78BFA', '#FB923C', '#E879F9', '#2DD4BF',
 ]
+// Gaussian σ=3 s — cyan
+const SMOOTH_G3_COLORS = [
+  '#22D3EE', '#818CF8', '#4ADE80', '#F472B6',
+  '#67E8F9', '#A3E635', '#C084FC', '#38BDF8',
+]
+// Gaussian σ=5 s — rose
+const SMOOTH_G5_COLORS = [
+  '#F43F5E', '#6366F1', '#10B981', '#FB923C',
+  '#E879F9', '#84CC16', '#0EA5E9', '#D946EF',
+]
+// Gaussian σ=8 s — lime (heaviest, smoothest)
+const SMOOTH_G8_COLORS = [
+  '#84CC16', '#F59E0B', '#34D399', '#A78BFA',
+  '#FB923C', '#22D3EE', '#F87171', '#E879F9',
+]
+
+/** Gaussian kernel smooth — symmetric, look-ahead only for visualisation */
+function gaussianSmooth(pts: ChartPoint[], src: string, sigma: number): (number | null)[] {
+  const radius = Math.ceil(3 * sigma)
+  return pts.map((_, i) => {
+    let sum = 0, w = 0
+    for (let j = Math.max(0, i - radius); j <= Math.min(pts.length - 1, i + radius); j++) {
+      const v = pts[j][src]
+      if (typeof v !== 'number') continue
+      const wj = Math.exp(-0.5 * ((j - i) / sigma) ** 2)
+      sum += v * wj; w += wj
+    }
+    return w > 0 ? sum / w : null
+  })
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const HISTORY_MS    = 3 * 60 * 1000
@@ -202,6 +232,10 @@ export function LiveChart() {
   // Accumulates all source names seen this session so lines don't vanish when a source goes quiet
   const [seenSources,   setSeenSources]   = useState<string[]>([])
   const [, startTransition] = useTransition()
+  const [showRaw, setShowRaw] = useState(true)
+  const [showG3,  setShowG3]  = useState(true)
+  const [showG5,  setShowG5]  = useState(true)
+  const [showG8,  setShowG8]  = useState(true)
 
   // ── Device identity ──────────────────────────────────────────────────────────
   const [micSource,    setMicSourceState]    = useState<string>('default')
@@ -578,6 +612,56 @@ export function LiveChart() {
     return Array.from(set).sort()
   }, [seenSources, micActive, micSource])
 
+  // Gaussian-smoothed overlays (σ = 3 / 5 / 8 s) — computed per source then merged
+  const smoothedPoints = useMemo(() => {
+    const series: Record<string, (number | null)[]> = {}
+    for (const src of knownSources) {
+      series[`${src}_g3`] = gaussianSmooth(points, src, 3)
+      series[`${src}_g5`] = gaussianSmooth(points, src, 5)
+      series[`${src}_g8`] = gaussianSmooth(points, src, 8)
+    }
+    // Also compute causal threshold line per source (rolling median of last 30 raw + DELTA_DB)
+    const BG_WIN = 30
+    const DELTA_DB = 10
+    for (const src of knownSources) {
+      series[`${src}_thresh`] = points.map((_, i) => {
+        const bg = points.slice(Math.max(0, i - BG_WIN), i)
+          .map(p => p[src]).filter((v): v is number => v != null).sort((a, b) => a - b)
+        if (bg.length === 0) return null
+        return bg[Math.floor(bg.length / 2)] + DELTA_DB
+      })
+    }
+
+    return points.map((pt, i) => {
+      const result: ChartPoint = { ...pt }
+      for (const key of Object.keys(series)) result[key] = series[key][i] ?? undefined
+      return result
+    })
+  }, [points, knownSources])
+
+  // Detected passage windows: G5 smooth > threshold for 8+ consecutive readings
+  const detectedPassages = useMemo(() => {
+    const MIN_DUR = 8
+    const passages: Array<{ startMs: number; endMs: number; src: string }> = []
+    for (const src of knownSources) {
+      let runStart = -1
+      smoothedPoints.forEach((pt, i) => {
+        const smoothed  = pt[`${src}_g5`]
+        const threshold = pt[`${src}_thresh`]
+        const above = typeof smoothed === 'number' && typeof threshold === 'number' && smoothed > threshold
+        if (above && runStart === -1) { runStart = i }
+        else if (!above && runStart !== -1) {
+          if (i - runStart >= MIN_DUR)
+            passages.push({ startMs: smoothedPoints[runStart].tsMs, endMs: smoothedPoints[i - 1].tsMs, src })
+          runStart = -1
+        }
+      })
+      if (runStart !== -1 && smoothedPoints.length - runStart >= MIN_DUR)
+        passages.push({ startMs: smoothedPoints[runStart].tsMs, endMs: smoothedPoints[smoothedPoints.length - 1].tsMs, src })
+    }
+    return passages
+  }, [smoothedPoints, knownSources])
+
   // ── Render ────────────────────────────────────────────────────────────────
   if (loading) return <Skeleton className="w-full h-72" />
   if (error)   return (
@@ -719,10 +803,35 @@ export function LiveChart() {
         </div>
       )}
 
+      {/* Smoothing toggle strip */}
+      {(hasData || micActive) && (
+        <div className="flex items-center gap-1.5 px-1 pb-0.5">
+          <span className="text-[10px] text-muted-foreground/60 mr-1">Show:</span>
+          {([
+            { key: 'raw', label: 'Raw',        active: showRaw, set: setShowRaw },
+            { key: 'g3',  label: 'Gauss σ3 s', active: showG3,  set: setShowG3  },
+            { key: 'g5',  label: 'Gauss σ5 s', active: showG5,  set: setShowG5  },
+            { key: 'g8',  label: 'Gauss σ8 s', active: showG8,  set: setShowG8  },
+          ] as const).map(({ key, label, active, set }) => (
+            <button
+              key={key}
+              onClick={() => set(v => !v)}
+              className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
+                active
+                  ? 'border-primary/60 bg-primary/10 text-primary'
+                  : 'border-border/40 text-muted-foreground/40 hover:border-border/60'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Chart */}
       {(hasData || micActive) && (
         <ResponsiveContainer width="100%" height={340}>
-          <ComposedChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+          <ComposedChart data={smoothedPoints} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="4 4" stroke="hsl(216 34% 14%)" />
 
             <XAxis
@@ -824,7 +933,38 @@ export function LiveChart() {
               strokeWidth={1}
             />
 
+            {/* Detected passage shading */}
+            {detectedPassages.map((p, i) => {
+              const ci = knownSources.indexOf(p.src)
+              const color = SOURCE_COLORS[ci % SOURCE_COLORS.length]
+              return (
+                <ReferenceArea
+                  key={`det-${p.src}-${i}`}
+                  x1={p.startMs} x2={p.endMs}
+                  fill={color} fillOpacity={0.15}
+                  stroke={color} strokeOpacity={0.4} strokeWidth={1}
+                />
+              )
+            })}
+
+            {/* Threshold lines (rolling baseline + 10 dB) */}
             {knownSources.map((src, i) => (
+              <Line
+                key={`${src}_thresh`}
+                type="monotone"
+                dataKey={`${src}_thresh`}
+                stroke={SOURCE_COLORS[i % SOURCE_COLORS.length]}
+                strokeWidth={1}
+                strokeDasharray="3 4"
+                strokeOpacity={0.5}
+                dot={false}
+                isAnimationActive={false}
+                connectNulls={true}
+                legendType="none"
+              />
+            ))}
+
+            {showRaw && knownSources.map((src, i) => (
               <Line
                 key={src}
                 type="linear"
@@ -835,6 +975,25 @@ export function LiveChart() {
                 dot={false}
                 isAnimationActive={false}
                 connectNulls={true}
+              />
+            ))}
+
+            {showG3 && knownSources.map((src, i) => (
+              <Line key={`${src}_g3`} type="monotone" dataKey={`${src}_g3`}
+                stroke={SMOOTH_G3_COLORS[i % SMOOTH_G3_COLORS.length]}
+                strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={true} legendType="none"
+              />
+            ))}
+            {showG5 && knownSources.map((src, i) => (
+              <Line key={`${src}_g5`} type="monotone" dataKey={`${src}_g5`}
+                stroke={SMOOTH_G5_COLORS[i % SMOOTH_G5_COLORS.length]}
+                strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={true} legendType="none"
+              />
+            ))}
+            {showG8 && knownSources.map((src, i) => (
+              <Line key={`${src}_g8`} type="monotone" dataKey={`${src}_g8`}
+                stroke={SMOOTH_G8_COLORS[i % SMOOTH_G8_COLORS.length]}
+                strokeWidth={2.5} dot={false} isAnimationActive={false} connectNulls={true} legendType="none"
               />
             ))}
           </ComposedChart>
@@ -865,6 +1024,24 @@ export function LiveChart() {
             {src}{micActive && src === micSource ? ' (mic)' : ''}
           </span>
         ))}
+        {showG3 && (
+          <span className="flex items-center gap-1.5 text-muted-foreground/70">
+            <span className="inline-block w-4 h-0.5 rounded" style={{ backgroundColor: SMOOTH_G3_COLORS[0] }} />
+            Gauss σ3 s
+          </span>
+        )}
+        {showG5 && (
+          <span className="flex items-center gap-1.5 text-muted-foreground/70">
+            <span className="inline-block w-4 h-0.5 rounded" style={{ backgroundColor: SMOOTH_G5_COLORS[0] }} />
+            Gauss σ5 s
+          </span>
+        )}
+        {showG8 && (
+          <span className="flex items-center gap-1.5 text-muted-foreground/70">
+            <span className="inline-block w-4 h-0.5 rounded" style={{ backgroundColor: SMOOTH_G8_COLORS[0] }} />
+            Gauss σ8 s
+          </span>
+        )}
         {manualTags.length > 0 && (
           <span className="flex items-center gap-1.5">
             <span className="inline-block w-4 h-2 rounded-sm bg-amber-400/20 border border-amber-400/50" />
