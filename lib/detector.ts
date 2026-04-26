@@ -34,7 +34,10 @@ function rollingMedian(vals: number[], i: number, n: number): number | null {
   const win = vals.slice(Math.max(0, i - n), i).filter(v => isFinite(v))
   if (win.length === 0) return null
   const sorted = [...win].sort((a, b) => a - b)
-  return sorted[Math.floor(sorted.length / 2)]
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid]
 }
 
 /**
