@@ -129,14 +129,15 @@ export async function POST(req: NextRequest) {
 
     const passages = detectPassages(window)
     const ids = passages.flatMap(p => p.readingIds)
+    const numericIds = ids.map(id => Number(id))
 
-    if (ids.length > 0) {
+    if (numericIds.length > 0) {
       await sql`
         UPDATE readings
         SET tram_flag = TRUE
-        WHERE id = ANY(${ids as unknown as number[]})
+        WHERE id = ANY(${numericIds}) AND tram_flag = FALSE
       `
-      flaggedCount = ids.length
+      flaggedCount = numericIds.length
     }
   } catch (err) {
     console.error('browser-ingest: tram detection failed (non-fatal)', err)
