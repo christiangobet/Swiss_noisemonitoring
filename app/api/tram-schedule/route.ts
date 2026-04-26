@@ -26,8 +26,13 @@ export async function GET(req: NextRequest) {
         const allDeps = await getStationboardTrams(stopId, 20, false)
         const monitoredLines = stop.monitored_lines ? String(stop.monitored_lines) : null
         if (monitoredLines && monitoredLines.trim().length > 0) {
-          const allowed = new Set(monitoredLines.split(',').map((l: string) => l.trim()).filter(Boolean))
-          return allDeps.filter(d => allowed.has(d.line))
+          const entries = monitoredLines.split(',').map((l: string) => l.trim()).filter(Boolean)
+          // Ignore stale GTFS trip IDs (purely numeric, 5+ digits) — use only short line numbers
+          const lineNumbers = entries.filter(e => !/^\d{5,}$/.test(e))
+          if (lineNumbers.length > 0) {
+            const allowed = new Set(lineNumbers)
+            return allDeps.filter(d => allowed.has(d.line))
+          }
         }
         return allDeps
       })

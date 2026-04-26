@@ -620,9 +620,9 @@ export function LiveChart() {
       series[`${src}_g5`] = gaussianSmooth(points, src, 5)
       series[`${src}_g8`] = gaussianSmooth(points, src, 8)
     }
-    // Also compute causal threshold line per source (rolling median of last 30 raw + DELTA_DB)
-    const BG_WIN = 30
-    const DELTA_DB = 10
+    // Causal threshold: rolling median of last 30 raw readings + DELTA_DB
+    const BG_WIN   = 30
+    const DELTA_DB = 8   // lowered from 10 — catches quieter trams
     for (const src of knownSources) {
       series[`${src}_thresh`] = points.map((_, i) => {
         const bg = points.slice(Math.max(0, i - BG_WIN), i)
@@ -639,28 +639,63 @@ export function LiveChart() {
     })
   }, [points, knownSources])
 
-  // Detected passage windows: G5 smooth > threshold for 8+ consecutive readings
+  // Detected passage windows.
+  // OPEN:  5/10 raw readings above rolling threshold.
+  // CLOSE: G5 smooth has been declining for SLOPE_WIN consecutive readings AND
+  //        is within CLOSE_MARGIN dB of threshold — tram has clearly passed.
+  // Duration gate: discard passages < MIN_PASSAGE_SEC (rejects motorcycles ~3-6 s).
   const detectedPassages = useMemo(() => {
-    const MIN_DUR = 8
+    const VOTE_WIN        = 10
+    const VOTE_ON         = 5    // lowered — catches quieter trams
+    const SLOPE_WIN       = 5    // consecutive declining G5 readings required to close
+    const CLOSE_MARGIN    = 3    // dB: how close to threshold before we can close
+    const MIN_PASSAGE_SEC = 8
+
     const passages: Array<{ startMs: number; endMs: number; src: string }> = []
+
     for (const src of knownSources) {
-      let runStart = -1
-      smoothedPoints.forEach((pt, i) => {
-        const smoothed  = pt[`${src}_g5`]
-        const threshold = pt[`${src}_thresh`]
-        const above = typeof smoothed === 'number' && typeof threshold === 'number' && smoothed > threshold
-        if (above && runStart === -1) { runStart = i }
-        else if (!above && runStart !== -1) {
-          if (i - runStart >= MIN_DUR)
-            passages.push({ startMs: smoothedPoints[runStart].tsMs, endMs: smoothedPoints[i - 1].tsMs, src })
-          runStart = -1
+      let passageStart = -1
+      const candidates: Array<{ startMs: number; endMs: number; src: string }> = []
+
+      points.forEach((pt, i) => {
+        const winOffset = Math.max(0, i - VOTE_WIN + 1)
+        const votes = points.slice(winOffset, i + 1).filter((p, wi) => {
+          const thr = smoothedPoints[winOffset + wi]?.[`${src}_thresh`]
+          const v = p[src]
+          return typeof v === 'number' && typeof thr === 'number' && v > thr
+        }).length
+
+        // ── Open on vote threshold ────────────────────────────────────────
+        if (votes >= VOTE_ON && passageStart === -1) { passageStart = i; return }
+
+        // ── Close on slope: G5 consistently declining back to near threshold
+        if (passageStart !== -1 && i >= SLOPE_WIN) {
+          const g5Now   = smoothedPoints[i]?.[`${src}_g5`]
+          const thresh  = smoothedPoints[i]?.[`${src}_thresh`]
+          // Check G5 declining for SLOPE_WIN readings
+          let declining = true
+          for (let k = i - SLOPE_WIN + 1; k <= i; k++) {
+            const a = smoothedPoints[k - 1]?.[`${src}_g5`]
+            const b = smoothedPoints[k]?.[`${src}_g5`]
+            if (typeof a !== 'number' || typeof b !== 'number' || b > a) { declining = false; break }
+          }
+          const nearBaseline = typeof g5Now === 'number' && typeof thresh === 'number'
+            && g5Now < thresh + CLOSE_MARGIN
+
+          if (declining && nearBaseline) {
+            candidates.push({ startMs: points[passageStart].tsMs, endMs: pt.tsMs, src })
+            passageStart = -1
+          }
         }
       })
-      if (runStart !== -1 && smoothedPoints.length - runStart >= MIN_DUR)
-        passages.push({ startMs: smoothedPoints[runStart].tsMs, endMs: smoothedPoints[smoothedPoints.length - 1].tsMs, src })
+      if (passageStart !== -1)
+        candidates.push({ startMs: points[passageStart].tsMs, endMs: points[points.length - 1].tsMs, src })
+
+      for (const c of candidates)
+        if (c.endMs - c.startMs >= MIN_PASSAGE_SEC * 1000) passages.push(c)
     }
     return passages
-  }, [smoothedPoints, knownSources])
+  }, [points, smoothedPoints, knownSources])
 
   // ── Render ────────────────────────────────────────────────────────────────
   if (loading) return <Skeleton className="w-full h-72" />
