@@ -51,8 +51,8 @@ export async function GET(req: NextRequest) {
       )
       SELECT
         start_ts, end_ts, duration_sec,
-        ROUND(peak_db::numeric, 1)   AS peak_db,
-        ROUND(median_peak::numeric, 1) AS median_peak,
+        ROUND(peak_db::numeric, 1)::float8   AS peak_db,
+        ROUND(median_peak::numeric, 1)::float8 AS median_peak,
         peak_db > (median_peak + ${OUTLIER_DELTA}) AS is_outlier
       FROM with_median
       ORDER BY peak_db DESC
@@ -73,9 +73,9 @@ export async function GET(req: NextRequest) {
     // ── Coverage % ────────────────────────────────────────────────────────────
     const covRows = await sql`
       SELECT
-        COUNT(DISTINCT DATE_TRUNC('hour', ts)) AS hours_with_data,
-        GREATEST(1, ROUND(EXTRACT(EPOCH FROM (${to}::timestamptz - ${from}::timestamptz)) / 3600)) AS total_hours,
-        COUNT(*) AS total_readings
+        COUNT(DISTINCT DATE_TRUNC('hour', ts))::int AS hours_with_data,
+        GREATEST(1, ROUND(EXTRACT(EPOCH FROM (${to}::timestamptz - ${from}::timestamptz)) / 3600))::int AS total_hours,
+        COUNT(*)::int AS total_readings
       FROM readings
       WHERE source = ${source}
         AND ts >= ${from}::timestamptz AND ts <= ${to}::timestamptz
