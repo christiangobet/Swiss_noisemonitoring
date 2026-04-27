@@ -29,9 +29,9 @@ export async function GET(req: NextRequest) {
           ORDER BY ts ASC, source ASC`
 
     const header = 'timestamp,source,db_raw,db_cal,tram_flag\n'
-    const body = (rows as { ts: string; source: string; db_raw: number; db_cal: number | null; tram_flag: boolean }[])
+    const body = (rows as { ts: Date | string; source: string; db_raw: number | null; db_cal: number | null; tram_flag: boolean }[])
       .map(r =>
-        `${r.ts},${r.source},${r.db_raw?.toFixed(2)},${r.db_cal?.toFixed(2) ?? ''},${r.tram_flag}`
+        `${new Date(r.ts).toISOString()},${r.source},${r.db_raw != null ? r.db_raw.toFixed(2) : ''},${r.db_cal != null ? r.db_cal.toFixed(2) : ''},${r.tram_flag}`
       )
       .join('\n')
 
