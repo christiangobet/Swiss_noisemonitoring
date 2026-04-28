@@ -34,7 +34,6 @@ export default function HistoryPage() {
 
   const [from, setFrom]           = useState(weekAgo.toISOString().substring(0, 10))
   const [to, setTo]               = useState(now.toISOString().substring(0, 10))
-  const [sources, setSources]     = useState<string[]>([])
   const [source, setSource]       = useState<string>('')
   const [hourPoints, setHourPoints] = useState<HourPoint[]>([])
   const [stats, setStats]         = useState<StatsResponse | null>(null)
@@ -42,17 +41,6 @@ export default function HistoryPage() {
   const [detectLoading, setDetectLoading] = useState(false)
   const [detectResult, setDetectResult]   = useState<string | null>(null)
   const [error, setError]         = useState<string | null>(null)
-
-  const loadSources = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/history?from=${encodeURIComponent(new Date(from + 'T00:00:00').toISOString())}&to=${encodeURIComponent(new Date(to + 'T23:59:59').toISOString())}&resolution=hour`)
-      if (!res.ok) return
-      const data = await res.json()
-      const pts = (data.points ?? []) as HourPoint[]
-      const unique = Array.from(new Set(pts.map((p: HourPoint) => p.source))).sort()
-      setSources(unique)
-    } catch { /* non-fatal */ }
-  }, [from, to])
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -79,7 +67,6 @@ export default function HistoryPage() {
     }
   }, [from, to, source])
 
-  useEffect(() => { loadSources() }, [loadSources])
   useEffect(() => { fetchData() }, [fetchData])
 
   const handleRedetect = async () => {
@@ -184,6 +171,11 @@ export default function HistoryPage() {
     doc.save(`tramwatch-report-${source}-${from}-${to}.pdf`)
   }
 
+  const sources = useMemo(
+    () => Array.from(new Set(hourPoints.map(p => p.source))).sort(),
+    [hourPoints]
+  )
+
   const chartData = useMemo(() => {
     const map = new Map<string, Record<string, number | string>>()
     for (const row of hourPoints) {
@@ -201,11 +193,17 @@ export default function HistoryPage() {
 
   const tramBands = useMemo(() => {
     if (!stats?.passages.length) return []
-    return stats.passages.map(p => ({
-      x1: formatZurichTime(p.start_ts, 'datetime'),
-      x2: formatZurichTime(p.end_ts,   'datetime'),
-      isOutlier: p.is_outlier,
-    }))
+    return stats.passages.map(p => {
+      const startHour = new Date(p.start_ts)
+      startHour.setMinutes(0, 0, 0)
+      const endHour = new Date(p.end_ts)
+      endHour.setMinutes(59, 59, 999)
+      return {
+        x1: formatZurichTime(startHour.toISOString(), 'datetime'),
+        x2: formatZurichTime(endHour.toISOString(), 'datetime'),
+        isOutlier: p.is_outlier,
+      }
+    })
   }, [stats])
 
   const narrative = stats ? buildNarrative(stats, from, to, source) : null
