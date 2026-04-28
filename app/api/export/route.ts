@@ -28,6 +28,13 @@ export async function GET(req: NextRequest) {
           WHERE ts >= ${from}::timestamptz AND ts <= ${to}::timestamptz
           ORDER BY ts ASC, source ASC`
 
+    const MAX_EXPORT_ROWS = 500_000
+    if (rows.length >= MAX_EXPORT_ROWS) {
+      return NextResponse.json({
+        error: `Export too large (${rows.length.toLocaleString()} rows). Narrow the date range or filter by source.`
+      }, { status: 413 })
+    }
+
     const header = 'timestamp,source,db_raw,db_cal,tram_flag\n'
     const body = (rows as { ts: Date | string; source: string; db_raw: number | null; db_cal: number | null; tram_flag: boolean }[])
       .map(r =>

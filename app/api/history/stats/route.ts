@@ -94,7 +94,7 @@ export async function GET(req: NextRequest) {
       outlier_threshold_db:   outlierThreshold,
       outlier_passages:       outlierCount,
       avg_background_db:      bgRows[0]?.leq ?? null,
-      worst_peak_db:          passageRows[0]?.peak_db ?? null,
+      worst_peak_db:          passageRows.find(p => p.is_outlier)?.peak_db ?? null,
       passages:               passageRows,
     })
   } catch (err: unknown) {
