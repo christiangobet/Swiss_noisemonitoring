@@ -4,10 +4,12 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
   Activity,
+  BarChart2,
   History,
   FileText,
   Settings,
   Gauge,
+  LogOut,
   Radio,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -16,6 +18,7 @@ import { RecordingPill } from './recording-popover'
 const NAV_ITEMS = [
   { href: '/', label: 'Dashboard', icon: Activity },
   { href: '/history', label: 'History', icon: History },
+  { href: '/analysis', label: 'Analysis', icon: BarChart2 },
   { href: '/reports', label: 'Reports', icon: FileText },
   { href: '/calibration', label: 'Calibration', icon: Gauge },
   { href: '/settings', label: 'Settings', icon: Settings },
@@ -59,6 +62,19 @@ export function Sidebar() {
       {/* Recording status */}
       <div className="px-2 pb-2">
         <RecordingPill popoverSide="right" />
+      </div>
+
+      {/* Logout */}
+      <div className="px-2 pb-1">
+        <form action="/api/auth/logout" method="POST">
+          <button
+            type="submit"
+            className="flex items-center gap-3 w-full px-3 py-2 rounded-md text-sm font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
+          >
+            <LogOut className="h-4 w-4 shrink-0" />
+            Logout
+          </button>
+        </form>
       </div>
 
       {/* Footer */}
