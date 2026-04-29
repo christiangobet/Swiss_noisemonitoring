@@ -80,6 +80,15 @@ CREATE TABLE IF NOT EXISTS gtfs_meta (
   valid_from   DATE,
   valid_to     DATE
 );
+
+CREATE TABLE IF NOT EXISTS tram_line_offsets (
+  id          SERIAL PRIMARY KEY,
+  line        TEXT NOT NULL,
+  direction   TEXT NOT NULL,
+  offset_sec  INTEGER NOT NULL DEFAULT 0,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (line, direction)
+);
 `
 
 // Types mirroring DB rows
@@ -138,6 +147,14 @@ export interface GtfsMeta {
   feed_version: string | null
   valid_from: string | null
   valid_to: string | null
+}
+
+export interface TramLineOffset {
+  id: number
+  line: string
+  direction: string
+  offset_sec: number
+  updated_at: string
 }
 
 // Swiss noise limits (ES II residential zone, LSV)
