@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { unsealData } from 'iron-session'
 import { SessionData, sessionOptions } from '@/lib/session'
 
-const PUBLIC_PREFIXES = ['/login', '/api/auth/', '/api/ingest']
+const PUBLIC_PREFIXES = ['/login', '/api/auth/', '/api/ingest', '/api/setup']
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
